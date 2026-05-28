@@ -119,13 +119,15 @@ public final class Tracker {
                 extendMin: nil, comment: comment))
             state = .tracking(taskId: taskId, phase: phase, deadline: deadline)
             activeTask = tasks.first(where: { $0.id == taskId })
-        case let .armed(_, _, nextPhase, _):
+        case .armed:
             // Switch during ARMED = implicit ack, advance phase, then switch.
             advance()
             // After advance() state is .tracking on next phase's accrual target.
-            // Now switch to the user-picked task.
-            if case let .tracking(_, phase, deadline) = state {
-                let prev = nextPhase.accrueAs == "break" ? (try? store.breakTaskId()) ?? -1 : -1
+            // Use that target as prevTaskId so the switch event's FK is valid
+            // (advance picks breakTaskId for break phases, the carried work task
+            // otherwise). A -1 sentinel would violate the events.prevTaskId FK
+            // and the throw would be swallowed by try?.
+            if case let .tracking(prev, phase, deadline) = state {
                 try? store.append(Event(
                     id: nil, ts: 0, type: EventType.switch.rawValue,
                     taskId: taskId, prevTaskId: prev,

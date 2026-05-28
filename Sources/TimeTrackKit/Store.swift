@@ -50,6 +50,16 @@ public struct KnownTask: Codable, FetchableRecord, PersistableRecord, Identifiab
     public var createdTs: Int64
 
     public static let databaseTableName = "known_tasks"
+
+    public init(id: Int64?, jiraKey: String?, description: String,
+                provisional: Bool, retired: Bool, createdTs: Int64) {
+        self.id = id
+        self.jiraKey = jiraKey
+        self.description = description
+        self.provisional = provisional
+        self.retired = retired
+        self.createdTs = createdTs
+    }
 }
 
 public struct Event: Codable, FetchableRecord, PersistableRecord {
