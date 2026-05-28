@@ -3,7 +3,7 @@ import GRDB
 
 // Event log is append-only. Corrections happen by appending new events,
 // never UPDATE/DELETE. This makes the file diff-able and recoverable.
-enum EventType: String, Codable {
+public enum EventType: String, Codable {
     case start
     case stop
     case `switch`
@@ -17,14 +17,22 @@ enum EventType: String, Codable {
     case reconcileBind = "reconcile_bind" // binds a loose task to a JIRA key
 }
 
-struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable {
-    var id: Int64?
-    var name: String
-    var code: String?           // JIRA key, ticket id
-    var category: String        // "project" | "overhead" | "meeting" | "break"
-    var archived: Bool
+public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable {
+    public var id: Int64?
+    public var name: String
+    public var code: String?           // JIRA key, ticket id
+    public var category: String        // "project" | "overhead" | "meeting" | "break"
+    public var archived: Bool
 
-    static let databaseTableName = "tasks"
+    public static let databaseTableName = "tasks"
+
+    public init(id: Int64?, name: String, code: String?, category: String, archived: Bool) {
+        self.id = id
+        self.name = name
+        self.code = code
+        self.category = category
+        self.archived = archived
+    }
 }
 
 // The Known Tasks registry — the curated spine. Maintained during iteration
@@ -33,47 +41,68 @@ struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable {
 // final report until promoted. "Overhead" is not a property here — time is
 // overhead purely by virtue of being bound to the overhead JIRA, which is an
 // ordinary registry entry.
-struct KnownTask: Codable, FetchableRecord, PersistableRecord, Identifiable {
-    var id: Int64?
-    var jiraKey: String?        // nil iff provisional
-    var description: String
-    var provisional: Bool
-    var retired: Bool           // carried out of the active list between iterations
-    var createdTs: Int64
+public struct KnownTask: Codable, FetchableRecord, PersistableRecord, Identifiable {
+    public var id: Int64?
+    public var jiraKey: String?        // nil iff provisional
+    public var description: String
+    public var provisional: Bool
+    public var retired: Bool           // carried out of the active list between iterations
+    public var createdTs: Int64
 
-    static let databaseTableName = "known_tasks"
+    public static let databaseTableName = "known_tasks"
 }
 
-struct Event: Codable, FetchableRecord, PersistableRecord {
-    var id: Int64?
-    var ts: Int64               // unix epoch millis
-    var type: String            // EventType.rawValue
-    var taskId: Int64?
-    var prevTaskId: Int64?
-    var phaseId: String?        // phase id from profile when relevant
-    var profileName: String?
-    var extendMin: Int?         // for phase_extend
-    var comment: String?
+public struct Event: Codable, FetchableRecord, PersistableRecord {
+    public var id: Int64?
+    public var ts: Int64               // unix epoch millis
+    public var type: String            // EventType.rawValue
+    public var taskId: Int64?
+    public var prevTaskId: Int64?
+    public var phaseId: String?        // phase id from profile when relevant
+    public var profileName: String?
+    public var extendMin: Int?         // for phase_extend
+    public var comment: String?
     // For idle_resolve: the segment interval being reattributed and its target.
     // rangeStart/rangeEnd are epoch millis; taskId holds the chosen target
     // (null = discard). Disjoint per segment, so reattributions never overlap.
-    var rangeStart: Int64? = nil
-    var rangeEnd: Int64? = nil
+    public var rangeStart: Int64? = nil
+    public var rangeEnd: Int64? = nil
     // For reconcile_bind: the registry entry this loose task maps to. The JIRA
     // key is resolved THROUGH the registry at report time, so promoting a
     // provisional Known Task propagates to every binding without re-binding.
     // There is no "kind" — the bind target (which Known Task) is the whole story;
     // time is overhead iff bound to the overhead JIRA.
-    var knownTaskId: Int64? = nil
-    var jiraKey: String? = nil   // unused for binds; kept for future raw-key paths
+    public var knownTaskId: Int64? = nil
+    public var jiraKey: String? = nil   // unused for binds; kept for future raw-key paths
 
-    static let databaseTableName = "events"
+    public static let databaseTableName = "events"
+
+    public init(id: Int64?, ts: Int64, type: String,
+                taskId: Int64?, prevTaskId: Int64?,
+                phaseId: String?, profileName: String?,
+                extendMin: Int?, comment: String?,
+                rangeStart: Int64? = nil, rangeEnd: Int64? = nil,
+                knownTaskId: Int64? = nil, jiraKey: String? = nil) {
+        self.id = id
+        self.ts = ts
+        self.type = type
+        self.taskId = taskId
+        self.prevTaskId = prevTaskId
+        self.phaseId = phaseId
+        self.profileName = profileName
+        self.extendMin = extendMin
+        self.comment = comment
+        self.rangeStart = rangeStart
+        self.rangeEnd = rangeEnd
+        self.knownTaskId = knownTaskId
+        self.jiraKey = jiraKey
+    }
 }
 
-final class Store {
+public final class Store {
     private let dbQueue: DatabaseQueue
 
-    init(url: URL) throws {
+    public init(url: URL) throws {
         try FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(),
             withIntermediateDirectories: true)
@@ -141,7 +170,7 @@ final class Store {
         }
     }
 
-    func breakTaskId() throws -> Int64 {
+    public func breakTaskId() throws -> Int64 {
         try dbQueue.read { db in
             try Task.filter(Column("category") == "break")
                 .fetchOne(db)?.id ?? -1
@@ -150,7 +179,7 @@ final class Store {
 
     // MARK: - Tasks
 
-    func tasks(includeArchived: Bool = false) throws -> [Task] {
+    public func tasks(includeArchived: Bool = false) throws -> [Task] {
         try dbQueue.read { db in
             var req = Task.order(Column("name"))
             if !includeArchived {
@@ -160,7 +189,7 @@ final class Store {
         }
     }
 
-    func upsertTask(_ task: Task) throws -> Task {
+    public func upsertTask(_ task: Task) throws -> Task {
         try dbQueue.write { db in
             var t = task
             try t.save(db)
@@ -171,7 +200,7 @@ final class Store {
     // MARK: - Events
 
     @discardableResult
-    func append(_ event: Event) throws -> Event {
+    public func append(_ event: Event) throws -> Event {
         try dbQueue.write { db in
             var e = event
             if e.ts == 0 { e.ts = Int64(Date().timeIntervalSince1970 * 1000) }
@@ -182,9 +211,9 @@ final class Store {
 
     // MARK: - Reporting
 
-    struct DayRow {
-        let task: Task
-        let totalSeconds: Int
+    public struct DayRow {
+        public let task: Task
+        public let totalSeconds: Int
     }
 
     // Time on each task for a given day, computed from event intervals.
@@ -192,7 +221,7 @@ final class Store {
     // this.taskId whenever this is a tracking event (start/switch/phase_advance
     // into a non-break phase). Stop events close the interval. Day boundaries
     // are open intervals carried forward/back as needed.
-    func report(day: Date) throws -> [DayRow] {
+    public func report(day: Date) throws -> [DayRow] {
         let cal = Calendar.current
         let dayStart = cal.startOfDay(for: day)
         let dayEnd = cal.date(byAdding: .day, value: 1, to: dayStart)!
@@ -302,7 +331,7 @@ final class Store {
     // The curated spine. The only valid reconciliation target. Provisional
     // entries have no jiraKey yet and block the final report until promoted.
 
-    func knownTasks(activeOnly: Bool = true) throws -> [KnownTask] {
+    public func knownTasks(activeOnly: Bool = true) throws -> [KnownTask] {
         try dbQueue.read { db in
             var req = KnownTask.all()
             if activeOnly { req = req.filter(Column("retired") == false) }
@@ -311,7 +340,7 @@ final class Store {
     }
 
     @discardableResult
-    func addKnownTask(jiraKey: String?, description: String) throws -> KnownTask {
+    public func addKnownTask(jiraKey: String?, description: String) throws -> KnownTask {
         try dbQueue.write { db in
             var k = KnownTask(
                 id: nil, jiraKey: jiraKey, description: description,
@@ -326,7 +355,7 @@ final class Store {
     // Promote a provisional entry by attaching its real JIRA key. Because binds
     // reference the registry id (not the key), every prior binding to this entry
     // now resolves to the real key automatically — no re-binding.
-    func promoteKnownTask(id: Int64, jiraKey: String) throws {
+    public func promoteKnownTask(id: Int64, jiraKey: String) throws {
         try dbQueue.write { db in
             if var k = try KnownTask.fetchOne(db, key: id) {
                 k.jiraKey = jiraKey
@@ -336,7 +365,7 @@ final class Store {
         }
     }
 
-    func retireKnownTask(id: Int64) throws {
+    public func retireKnownTask(id: Int64) throws {
         try dbQueue.write { db in
             if var k = try KnownTask.fetchOne(db, key: id) {
                 k.retired = true
@@ -353,13 +382,13 @@ final class Store {
     // append-only overlays referencing the registry — never raw key strings, so
     // promotion propagates without re-binding.
 
-    struct UnreconciledTask {
-        let task: Task
-        let totalSeconds: Int
+    public struct UnreconciledTask {
+        public let task: Task
+        public let totalSeconds: Int
     }
 
     // Most recent registry binding per capture task (last write wins).
-    func bindings() throws -> [Int64: Int64] {   // captureTaskId -> knownTaskId
+    public func bindings() throws -> [Int64: Int64] {   // captureTaskId -> knownTaskId
         try dbQueue.read { db in
             let binds = try Event
                 .filter(Column("type") == EventType.reconcileBind.rawValue)
@@ -373,7 +402,7 @@ final class Store {
         }
     }
 
-    func bind(taskId: Int64, knownTaskId: Int64, comment: String?) throws {
+    public func bind(taskId: Int64, knownTaskId: Int64, comment: String?) throws {
         try append(Event(
             id: nil, ts: 0, type: EventType.reconcileBind.rawValue,
             taskId: taskId, prevTaskId: nil,
@@ -398,7 +427,7 @@ final class Store {
 
     // Ad-hoc capture tasks with time that aren't bound to a Known Task.
     // No heuristic: a task counts as reconciled ONLY via an explicit bind.
-    func unreconciled(from: Date, to: Date) throws -> [UnreconciledTask] {
+    public func unreconciled(from: Date, to: Date) throws -> [UnreconciledTask] {
         let binds = try bindings()
         let perTask = try windowSeconds(from: from, to: to)
         return try dbQueue.read { db in
@@ -415,7 +444,7 @@ final class Store {
 
     // Second gate condition: Known Tasks that have reported time (via bindings)
     // but are still provisional (no real JIRA key).
-    func provisionalWithTime(from: Date, to: Date) throws -> [KnownTask] {
+    public func provisionalWithTime(from: Date, to: Date) throws -> [KnownTask] {
         let binds = try bindings()
         let perTask = try windowSeconds(from: from, to: to)
         // Sum bound seconds per Known Task.
@@ -434,16 +463,19 @@ final class Store {
         }
     }
 
-    struct ReconciledRow { let jiraKey: String; let totalSeconds: Int }
+    public struct ReconciledRow {
+        public let jiraKey: String
+        public let totalSeconds: Int
+    }
 
     // Two distinct failure modes, surfaced separately so the UI can show them
     // differently: unbound ad-hoc tasks vs. provisional-with-time Known Tasks.
-    enum ReconcileError: Error {
+    public enum ReconcileError: Error {
         case unbound([UnreconciledTask])
         case provisional([KnownTask])
     }
 
-    func reconciledReport(from: Date, to: Date) throws -> [ReconciledRow] {
+    public func reconciledReport(from: Date, to: Date) throws -> [ReconciledRow] {
         let unbound = try unreconciled(from: from, to: to)
         guard unbound.isEmpty else { throw ReconcileError.unbound(unbound) }
         let provisional = try provisionalWithTime(from: from, to: to)

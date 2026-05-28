@@ -6,35 +6,35 @@ import Foundation
 // If the phase was already armed when idle began, inPhase collapses (zero-length)
 // and the whole episode is a single overrun segment.
 public struct IdleSegment: Identifiable {
-    enum Kind { case inPhase, overrun }
-    let id = UUID()
-    let kind: Kind
-    let start: Date
-    let end: Date
-    let originalTaskId: Int64       // what was accruing during this segment
-    let phaseId: String
-    let wasBreakPhase: Bool         // strict in-window rule: break inPhase auto-resolves
-    var resolved: Bool = false
+    public enum Kind { case inPhase, overrun }
+    public let id = UUID()
+    public let kind: Kind
+    public let start: Date
+    public let end: Date
+    public let originalTaskId: Int64       // what was accruing during this segment
+    public let phaseId: String
+    public let wasBreakPhase: Bool         // strict in-window rule: break inPhase auto-resolves
+    public var resolved: Bool = false
 
-    var minutes: Int { Int(end.timeIntervalSince(start) / 60) }
+    public var minutes: Int { Int(end.timeIntervalSince(start) / 60) }
 }
 
 // Tracks a single idle episode from detection through full resolution.
 public final class IdleEpisode {
-    let idleStart: Date
-    var returnTime: Date?
-    var segments: [IdleSegment] = []
+    public let idleStart: Date
+    public var returnTime: Date?
+    public var segments: [IdleSegment] = []
 
     // Presence-gated escalation bookkeeping. activeSecondsSinceReturn only
     // accumulates while input is actually detected — pauses if user leaves again.
-    var activeSecondsSinceReturn: TimeInterval = 0
-    var lastRungFired: Int = -1
-    var lastNotifyAt: Date?
+    public var activeSecondsSinceReturn: TimeInterval = 0
+    public var lastRungFired: Int = -1
+    public var lastNotifyAt: Date?
 
-    init(idleStart: Date) { self.idleStart = idleStart }
+    public init(idleStart: Date) { self.idleStart = idleStart }
 
-    var unresolvedSegments: [IdleSegment] { segments.filter { !$0.resolved } }
-    var fullyResolved: Bool { segments.allSatisfy { $0.resolved } }
+    public var unresolvedSegments: [IdleSegment] { segments.filter { !$0.resolved } }
+    public var fullyResolved: Bool { segments.allSatisfy { $0.resolved } }
 }
 
 // Owns idle detection and escalation timing. Called from Tracker's 1Hz tick.
@@ -45,12 +45,12 @@ public final class IdleMonitor {
     private let source: IdleSource
     public init(source: IdleSource) { self.source = source }
 
-    private(set) var episode: IdleEpisode?
+    public private(set) var episode: IdleEpisode?
     private var wasIdle = false
     private var lastTickActive = true
 
     // Returns an action for the Tracker to execute, if any.
-    enum Signal {
+    public enum Signal {
         case none
         case idleDetected(start: Date)         // crossed threshold; freeze phase
         case returned(segments: [IdleSegment]) // build prompt for these
@@ -60,13 +60,13 @@ public final class IdleMonitor {
     // phaseArmedAt: when the current phase armed (nil if still running).
     // armBoundary: when the current phase WILL arm (the freeze point) — nil if
     //   already armed (then whole idle is overrun).
-    func tick(now: Date,
-              profile: Profile,
-              currentTaskId: Int64?,
-              currentPhaseId: String,
-              isBreakPhase: Bool,
-              armBoundary: Date?,
-              breakTaskId: Int64) -> Signal {
+    public func tick(now: Date,
+                     profile: Profile,
+                     currentTaskId: Int64?,
+                     currentPhaseId: String,
+                     isBreakPhase: Bool,
+                     armBoundary: Date?,
+                     breakTaskId: Int64) -> Signal {
 
         let idleSec = source.idleSeconds()
         let threshold = Double((profile.idleThresholdMin ?? 5) * 60)
@@ -133,7 +133,7 @@ public final class IdleMonitor {
         return .none
     }
 
-    func resolveSegment(_ id: UUID) {
+    public func resolveSegment(_ id: UUID) {
         guard let ep = episode else { return }
         if let idx = ep.segments.firstIndex(where: { $0.id == id }) {
             ep.segments[idx].resolved = true

@@ -3,53 +3,53 @@ import Yams
 
 // A phase is one segment of a profile's cycle. Phases never auto-advance;
 // when their timer expires they ARM and wait for user acknowledgment.
-struct Phase: Codable {
-    let id: String                 // "work", "short_break", "long_break"
-    let durationMin: Int
-    let accrueAs: String?          // nil = accrue to current task; "break" = synthetic
-    let onArm: ArmConfig
+public struct Phase: Codable {
+    public let id: String                 // "work", "short_break", "long_break"
+    public let durationMin: Int
+    public let accrueAs: String?          // nil = accrue to current task; "break" = synthetic
+    public let onArm: ArmConfig
 }
 
-struct ArmConfig: Codable {
-    let sound: String              // NSSound name: "Glass", "Tink", etc.
-    let color: String              // icon color: "green_pulse", "amber", "red"
-    let actions: [ArmAction]
+public struct ArmConfig: Codable {
+    public let sound: String              // NSSound name: "Glass", "Tink", etc.
+    public let color: String              // icon color: "green_pulse", "amber", "red"
+    public let actions: [ArmAction]
 }
 
 // Actions available to the user when a phase is ARMED. Two kinds:
 //   advance_to: jump to the named phase (logs phase_advance)
 //   extend_min: add N minutes to the current phase (logs phase_extend)
 //   extend_prompt: open a custom-minutes dialog
-struct ArmAction: Codable {
-    let label: String
-    let advanceTo: String?
-    let extendMin: Int?
-    let extendPrompt: Bool?
+public struct ArmAction: Codable {
+    public let label: String
+    public let advanceTo: String?
+    public let extendMin: Int?
+    public let extendPrompt: Bool?
 }
 
-struct Profile: Codable {
-    let name: String
-    let cycle: [Phase]
-    let longCycleEvery: Int?       // nil = no long cycle
-    let longCycleOverride: [Phase]? // replaces final phase of cycle on Nth iteration
+public struct Profile: Codable {
+    public let name: String
+    public let cycle: [Phase]
+    public let longCycleEvery: Int?       // nil = no long cycle
+    public let longCycleOverride: [Phase]? // replaces final phase of cycle on Nth iteration
 
     // Idle detection. Idle below wiggleRoomMin is ignored entirely (bathroom,
     // coffee). Idle at/above idleThresholdMin opens a gap requiring classification.
-    let idleThresholdMin: Int?     // default 5 if nil
-    let wiggleRoomMin: Int?        // default 5 if nil; sub-threshold idle ignored
+    public let idleThresholdMin: Int?     // default 5 if nil
+    public let wiggleRoomMin: Int?        // default 5 if nil; sub-threshold idle ignored
 
     // Escalation. Two curves: flowArm (decision pending but user never went
     // idle — protect flow, cap gently) and idleReturn (user returned from idle
     // with unresolved segments — ramp hard). Both presence-gated: rungs only
     // advance on detected activity-seconds since the trigger, never on wall clock.
-    let escalation: EscalationConfig?
+    public let escalation: EscalationConfig?
 }
 
-struct EscalationConfig: Codable {
-    let flowArm: [EscalationRung]      // capped: icon/sound only, no notifications
-    let idleReturn: [EscalationRung]   // full ramp: ... → persistent notification
+public struct EscalationConfig: Codable {
+    public let flowArm: [EscalationRung]      // capped: icon/sound only, no notifications
+    public let idleReturn: [EscalationRung]   // full ramp: ... → persistent notification
 
-    static let `default` = EscalationConfig(
+    public static let `default` = EscalationConfig(
         flowArm: [
             EscalationRung(afterActiveSec: 0,   sound: "Tink",  color: "amber",      notify: false, repeatNotifySec: nil),
             EscalationRung(afterActiveSec: 120, sound: "Tink",  color: "amber_pulse", notify: false, repeatNotifySec: nil)
@@ -67,12 +67,12 @@ struct EscalationConfig: Codable {
 // A rung fires once cumulative active-seconds-since-trigger crosses afterActiveSec.
 // repeatNotifySec (if set) re-posts the notification on that cadence while still
 // active and unresolved — this is the permanent ceiling, never a modal.
-struct EscalationRung: Codable {
-    let afterActiveSec: Int
-    let sound: String?
-    let color: String
-    let notify: Bool
-    let repeatNotifySec: Int?
+public struct EscalationRung: Codable {
+    public let afterActiveSec: Int
+    public let sound: String?
+    public let color: String
+    public let notify: Bool
+    public let repeatNotifySec: Int?
 }
 
 // Iterator over a profile's phases. Tracks cycle count for long-break override.

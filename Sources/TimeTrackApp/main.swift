@@ -1,6 +1,8 @@
 import Foundation
-import AppKit
 import TimeTrackKit
+
+#if canImport(AppKit)
+import AppKit
 
 // The real macOS idle source — the CoreGraphics call removed from TimeTrackKit.
 // Lives here because it touches platform APIs; injected into IdleMonitor.
@@ -23,3 +25,14 @@ struct TimeTrackAppMain {
         fatalError("TimeTrackApp not yet implemented — see INITIAL_PROMPT.md Phase 5")
     }
 }
+#else
+// Linux build: TimeTrackApp is a macOS-only menu-bar app. The target still has
+// to produce an executable so `swift build` works on cloud (Linux) sessions —
+// this stub does that. Phase 5 work happens on macOS.
+@main
+struct TimeTrackAppMain {
+    static func main() {
+        fatalError("TimeTrackApp requires macOS — build TimeTrackKit / timetrack-cli on Linux instead")
+    }
+}
+#endif

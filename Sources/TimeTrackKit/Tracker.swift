@@ -1,24 +1,12 @@
 import Foundation
-// NOTE (Phase 1 refactor required): this file currently uses Combine/SwiftUI
-// (@Published, ObservableObject) and calls Sounds.play (NSSound). Neither can
-// compile in a Linux cloud session, which defeats the testability goal.
-//
-// Phase 1 task: decouple Tracker from Apple UI frameworks.
-//   - Replace @Published/ObservableObject with a plain observer/callback or a
-//     small AsyncStream<TrackerState> the app subscribes to.
-//   - Replace Sounds.play(...) with an emitted effect (e.g. .playSound(name))
-//     that the APP performs. The kit decides WHAT, the app does the SIDE EFFECT.
-// Until this is done, TimeTrackKit will not build on Linux and the cloud-session
-// test phase is blocked. This is the first real coding task, not boilerplate.
-
 
 // State machine. Three states, transitions logged as events.
-enum TrackerState: Equatable {
+public enum TrackerState: Equatable {
     case idle
     case tracking(taskId: Int64, phase: Phase, deadline: Date)
     case armed(taskId: Int64, phase: Phase, nextPhase: Phase, armedAt: Date)
 
-    static func == (l: TrackerState, r: TrackerState) -> Bool {
+    public static func == (l: TrackerState, r: TrackerState) -> Bool {
         switch (l, r) {
         case (.idle, .idle): return true
         case let (.tracking(a, p, d), .tracking(a2, p2, d2)):
@@ -31,20 +19,44 @@ enum TrackerState: Equatable {
 }
 
 @MainActor
-final class Tracker: ObservableObject {
-    @Published private(set) var state: TrackerState = .idle
-    @Published private(set) var activeTask: Task?
-    @Published private(set) var profileName: String = "default"
-    @Published private(set) var tasks: [Task] = []
-    @Published private(set) var profiles: [Profile] = []
-    @Published private(set) var todaySeconds: [Int64: Int] = [:]  // taskId -> sec
+public final class Tracker {
+    // Plain getters for observable properties. The app reads these synchronously;
+    // state changes are also pushed onto stateStream so views can react without
+    // polling. The other properties change less often — the app can refresh them
+    // alongside a state-stream event or via tick-driven mechanisms in Phase 5.
+    public private(set) var state: TrackerState = .idle {
+        didSet { stateContinuation.yield(state) }
+    }
+    public private(set) var activeTask: Task?
+    public private(set) var profileName: String = "default"
+    public private(set) var tasks: [Task] = []
+    public private(set) var profiles: [Profile] = []
+    public private(set) var todaySeconds: [Int64: Int] = [:]  // taskId -> sec
+
+    // Observation seam, replacing Combine. Single-subscriber AsyncStreams: the
+    // app awaits them. The kit decides what should happen (a state transition,
+    // a sound to play); the app performs any side effect.
+    public let stateStream: AsyncStream<TrackerState>
+    public let effectStream: AsyncStream<Effect>
+    private let stateContinuation: AsyncStream<TrackerState>.Continuation
+    private let effectContinuation: AsyncStream<Effect>.Continuation
 
     private let store: Store
     private var iterator: CycleIterator?
     private var profile: Profile? { profiles.first(where: { $0.name == profileName }) }
     private var tickTimer: Timer?
 
-    init(store: Store, profilesURL: URL) throws {
+    public init(store: Store, profilesURL: URL) throws {
+        // Wire the streams BEFORE any state mutation (didSet must have a live
+        // continuation to yield to).
+        var stateCont: AsyncStream<TrackerState>.Continuation!
+        self.stateStream = AsyncStream(bufferingPolicy: .bufferingNewest(1)) { stateCont = $0 }
+        self.stateContinuation = stateCont
+
+        var effectCont: AsyncStream<Effect>.Continuation!
+        self.effectStream = AsyncStream { effectCont = $0 }
+        self.effectContinuation = effectCont
+
         self.store = store
         self.profiles = try ProfileLoader.loadAll(from: profilesURL)
         self.tasks = try store.tasks()
@@ -75,7 +87,7 @@ final class Tracker: ObservableObject {
 
     // MARK: - Transitions
 
-    func start(taskId: Int64) {
+    public func start(taskId: Int64) {
         guard let prof = profile else { return }
         // Stop any existing tracking first (logs stop, resets cycle).
         if case .idle = state {} else { stop() }
@@ -95,7 +107,7 @@ final class Tracker: ObservableObject {
         activeTask = tasks.first(where: { $0.id == taskId })
     }
 
-    func switchTo(taskId: Int64, comment: String? = nil) {
+    public func switchTo(taskId: Int64, comment: String? = nil) {
         switch state {
         case .idle:
             start(taskId: taskId)
@@ -125,7 +137,7 @@ final class Tracker: ObservableObject {
         }
     }
 
-    func stop() {
+    public func stop() {
         if case .idle = state { return }
         try? store.append(Event(
             id: nil, ts: 0, type: EventType.stop.rawValue,
@@ -137,8 +149,8 @@ final class Tracker: ObservableObject {
         activeTask = nil
     }
 
-    // Called from tick() when timer expires. Logs phase_arm, plays sound,
-    // accrual continues against current task.
+    // Called from tick() when timer expires. Logs phase_arm, emits the sound
+    // effect for the app to play, accrual continues against current task.
     private func armPhase(taskId: Int64, phase: Phase) {
         guard let iter = iterator else { return }
         let nextPhase = iter.peekNext()
@@ -149,11 +161,11 @@ final class Tracker: ObservableObject {
             phaseId: phase.id, profileName: profileName,
             extendMin: nil, comment: nil))
 
-        Sounds.play(phase.onArm.sound)
+        effectContinuation.yield(.playSound(phase.onArm.sound))
         state = .armed(taskId: taskId, phase: phase, nextPhase: nextPhase, armedAt: Date())
     }
 
-    func advance(comment: String? = nil) {
+    public func advance(comment: String? = nil) {
         guard case let .armed(taskId, _, nextPhase, _) = state,
               let iter = iterator else { return }
 
@@ -184,10 +196,11 @@ final class Tracker: ObservableObject {
 
         state = .tracking(taskId: nextTaskId, phase: newPhase, deadline: deadline)
         activeTask = tasks.first(where: { $0.id == nextTaskId })
+        _ = nextPhase
     }
 
-    func extend(minutes: Int, comment: String? = nil) {
-        guard case let .armed(taskId, phase, nextPhase, _) = state else { return }
+    public func extend(minutes: Int, comment: String? = nil) {
+        guard case let .armed(taskId, phase, _, _) = state else { return }
         let deadline = Date().addingTimeInterval(Double(minutes * 60))
 
         try? store.append(Event(
@@ -196,13 +209,12 @@ final class Tracker: ObservableObject {
             phaseId: phase.id, profileName: profileName,
             extendMin: minutes, comment: comment))
 
-        // Return to tracking with new deadline; nextPhase is now stale but
-        // re-armed phase will recompute it.
-        _ = nextPhase
+        // Return to tracking with new deadline; the re-armed phase will
+        // recompute nextPhase when it next arms.
         state = .tracking(taskId: taskId, phase: phase, deadline: deadline)
     }
 
-    func setProfile(_ name: String) {
+    public func setProfile(_ name: String) {
         guard profiles.contains(where: { $0.name == name }), name != profileName else { return }
         try? store.append(Event(
             id: nil, ts: 0, type: EventType.profileChange.rawValue,
@@ -220,7 +232,7 @@ final class Tracker: ObservableObject {
         }
     }
 
-    func logInterruption(comment: String) {
+    public func logInterruption(comment: String) {
         try? store.append(Event(
             id: nil, ts: 0, type: EventType.interruption.rawValue,
             taskId: currentTaskId(), prevTaskId: nil,
@@ -228,7 +240,7 @@ final class Tracker: ObservableObject {
             extendMin: nil, comment: comment))
     }
 
-    func addTask(name: String, code: String?, category: String = "project") throws {
+    public func addTask(name: String, code: String?, category: String = "project") throws {
         let t = Task(id: nil, name: name, code: code, category: category, archived: false)
         _ = try store.upsertTask(t)
         self.tasks = try store.tasks()
