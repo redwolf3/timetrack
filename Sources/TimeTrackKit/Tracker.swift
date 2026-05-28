@@ -36,7 +36,21 @@ public final class Tracker {
     // Observation seam, replacing Combine. Single-subscriber AsyncStreams: the
     // app awaits them. The kit decides what should happen (a state transition,
     // a sound to play); the app performs any side effect.
+    //
+    // TODO (PR#1, Phase 5): These streams are single-consumer — each element is
+    // delivered to exactly one iterator.  If multiple views ever need state, replace
+    // with a broadcast primitive (e.g. AsyncBroadcastSequence or a Subject wrapper).
+    //
+    // stateStream uses bufferingNewest(1): rapid transitions coalesce — the
+    // subscriber always sees the latest state, never an intermediate one.  The
+    // synchronous `state` getter is the authoritative current value; stateStream
+    // is for push-notification only.  Subscribers should read `tracker.state` once
+    // on attach and then listen to the stream for deltas.
     public let stateStream: AsyncStream<TrackerState>
+    // effectStream uses bufferingNewest(8): effects (sounds, icon changes) are
+    // best-effort.  If the app is too slow to drain them, older ones are dropped
+    // rather than growing the buffer without bound.
+    // TODO (PR#1, Phase 5): revisit if effects must be lossless (e.g. audit log).
     public let effectStream: AsyncStream<Effect>
     private let stateContinuation: AsyncStream<TrackerState>.Continuation
     private let effectContinuation: AsyncStream<Effect>.Continuation
@@ -54,7 +68,7 @@ public final class Tracker {
         self.stateContinuation = stateCont
 
         var effectCont: AsyncStream<Effect>.Continuation!
-        self.effectStream = AsyncStream { effectCont = $0 }
+        self.effectStream = AsyncStream(bufferingPolicy: .bufferingNewest(8)) { effectCont = $0 }
         self.effectContinuation = effectCont
 
         self.store = store
@@ -63,15 +77,31 @@ public final class Tracker {
         startTickLoop()
     }
 
+    deinit {
+        // Signal stream termination so any awaiting subscriber unblocks cleanly.
+        // AsyncStream.Continuation is sendable and safe to finish from any thread.
+        tickTimer?.invalidate()
+        stateContinuation.finish()
+        effectContinuation.finish()
+    }
+
     // 1Hz tick: checks for phase expiry, refreshes today's totals.
     private func startTickLoop() {
+        // TODO (PR#1, Phase 5): Timer.scheduledTimer requires an active RunLoop and
+        // MainActor.assumeIsolated will precondition-fail if the RunLoop fires on a
+        // non-main thread (possible on Linux where Foundation's RunLoop is
+        // Dispatch-backed but not necessarily the main-actor executor).
+        // Fix: replace with a Task { while !Task.isCancelled { try await clock.sleep(for: .seconds(1)); tick() } }.
         tickTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.tick() }
+            MainActor.assumeIsolated { self?.tick(at: Date()) }
         }
     }
 
-    private func tick() {
-        if case let .tracking(taskId, phase, deadline) = state, Date() >= deadline {
+    // Drives one tick.  Production path: called by the 1Hz Timer with Date().
+    // Test path: call tick(at:) with a synthetic date to exercise phase expiry
+    // without waiting for wall-clock time (the Timer never fires in tests).
+    func tick(at now: Date = Date()) {
+        if case let .tracking(taskId, phase, deadline) = state, now >= deadline {
             armPhase(taskId: taskId, phase: phase)
         }
         refreshToday()
