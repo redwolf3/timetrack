@@ -1,3 +1,4 @@
+#if canImport(AppKit)
 import AppKit
 
 enum Sounds {
@@ -8,3 +9,4 @@ enum Sounds {
         NSSound(named: NSSound.Name(name))?.play()
     }
 }
+#endif
