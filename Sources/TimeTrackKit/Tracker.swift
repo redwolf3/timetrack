@@ -168,7 +168,7 @@ public final class Tracker {
     }
 
     public func advance(comment: String? = nil) {
-        guard case let .armed(taskId, _, nextPhase, _) = state,
+        guard case let .armed(taskId, _, _, _) = state,
               let iter = iterator else { return }
 
         _ = iter.advance()
@@ -198,7 +198,6 @@ public final class Tracker {
 
         state = .tracking(taskId: nextTaskId, phase: newPhase, deadline: deadline)
         activeTask = tasks.first(where: { $0.id == nextTaskId })
-        _ = nextPhase
     }
 
     public func extend(minutes: Int, comment: String? = nil) {
