@@ -10,7 +10,7 @@ import AppKit
 final class SystemIdleSource: IdleSource {
     func idleSeconds() -> TimeInterval {
         let anyEvent = CGEventType(rawValue: ~0)!   // kCGAnyInputEventType
-        return CGEventSourceSecondsSinceLastEventType(.combinedSessionState, anyEvent)
+        return CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: anyEvent)
     }
 }
 
