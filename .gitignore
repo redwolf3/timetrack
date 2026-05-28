@@ -1,0 +1,12 @@
+.build/
+.swiftpm/
+*.xcodeproj
+DerivedData/
+.DS_Store
+
+# Local data / secrets — never commit
+jira_cache.json
+*.db
+*.db-wal
+*.db-shm
+.env

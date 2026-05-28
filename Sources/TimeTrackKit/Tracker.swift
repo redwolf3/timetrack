@@ -1,0 +1,259 @@
+import Foundation
+// NOTE (Phase 1 refactor required): this file currently uses Combine/SwiftUI
+// (@Published, ObservableObject) and calls Sounds.play (NSSound). Neither can
+// compile in a Linux cloud session, which defeats the testability goal.
+//
+// Phase 1 task: decouple Tracker from Apple UI frameworks.
+//   - Replace @Published/ObservableObject with a plain observer/callback or a
+//     small AsyncStream<TrackerState> the app subscribes to.
+//   - Replace Sounds.play(...) with an emitted effect (e.g. .playSound(name))
+//     that the APP performs. The kit decides WHAT, the app does the SIDE EFFECT.
+// Until this is done, TimeTrackKit will not build on Linux and the cloud-session
+// test phase is blocked. This is the first real coding task, not boilerplate.
+
+
+// State machine. Three states, transitions logged as events.
+enum TrackerState: Equatable {
+    case idle
+    case tracking(taskId: Int64, phase: Phase, deadline: Date)
+    case armed(taskId: Int64, phase: Phase, nextPhase: Phase, armedAt: Date)
+
+    static func == (l: TrackerState, r: TrackerState) -> Bool {
+        switch (l, r) {
+        case (.idle, .idle): return true
+        case let (.tracking(a, p, d), .tracking(a2, p2, d2)):
+            return a == a2 && p.id == p2.id && d == d2
+        case let (.armed(a, p, n, t), .armed(a2, p2, n2, t2)):
+            return a == a2 && p.id == p2.id && n.id == n2.id && t == t2
+        default: return false
+        }
+    }
+}
+
+@MainActor
+final class Tracker: ObservableObject {
+    @Published private(set) var state: TrackerState = .idle
+    @Published private(set) var activeTask: Task?
+    @Published private(set) var profileName: String = "default"
+    @Published private(set) var tasks: [Task] = []
+    @Published private(set) var profiles: [Profile] = []
+    @Published private(set) var todaySeconds: [Int64: Int] = [:]  // taskId -> sec
+
+    private let store: Store
+    private var iterator: CycleIterator?
+    private var profile: Profile? { profiles.first(where: { $0.name == profileName }) }
+    private var tickTimer: Timer?
+
+    init(store: Store, profilesURL: URL) throws {
+        self.store = store
+        self.profiles = try ProfileLoader.loadAll(from: profilesURL)
+        self.tasks = try store.tasks()
+        startTickLoop()
+    }
+
+    // 1Hz tick: checks for phase expiry, refreshes today's totals.
+    private func startTickLoop() {
+        tickTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tick() }
+        }
+    }
+
+    private func tick() {
+        if case let .tracking(taskId, phase, deadline) = state, Date() >= deadline {
+            armPhase(taskId: taskId, phase: phase)
+        }
+        refreshToday()
+    }
+
+    private func refreshToday() {
+        if let rows = try? store.report(day: Date()) {
+            var map: [Int64: Int] = [:]
+            for r in rows { if let id = r.task.id { map[id] = r.totalSeconds } }
+            todaySeconds = map
+        }
+    }
+
+    // MARK: - Transitions
+
+    func start(taskId: Int64) {
+        guard let prof = profile else { return }
+        // Stop any existing tracking first (logs stop, resets cycle).
+        if case .idle = state {} else { stop() }
+
+        if iterator == nil { iterator = CycleIterator(profile: prof) }
+        iterator?.reset()
+        let phase = iterator!.currentPhase
+        let deadline = Date().addingTimeInterval(Double(phase.durationMin * 60))
+
+        try? store.append(Event(
+            id: nil, ts: 0, type: EventType.start.rawValue,
+            taskId: taskId, prevTaskId: nil,
+            phaseId: phase.id, profileName: prof.name,
+            extendMin: nil, comment: nil))
+
+        state = .tracking(taskId: taskId, phase: phase, deadline: deadline)
+        activeTask = tasks.first(where: { $0.id == taskId })
+    }
+
+    func switchTo(taskId: Int64, comment: String? = nil) {
+        switch state {
+        case .idle:
+            start(taskId: taskId)
+        case let .tracking(prev, phase, deadline):
+            try? store.append(Event(
+                id: nil, ts: 0, type: EventType.switch.rawValue,
+                taskId: taskId, prevTaskId: prev,
+                phaseId: phase.id, profileName: profileName,
+                extendMin: nil, comment: comment))
+            state = .tracking(taskId: taskId, phase: phase, deadline: deadline)
+            activeTask = tasks.first(where: { $0.id == taskId })
+        case let .armed(_, _, nextPhase, _):
+            // Switch during ARMED = implicit ack, advance phase, then switch.
+            advance()
+            // After advance() state is .tracking on next phase's accrual target.
+            // Now switch to the user-picked task.
+            if case let .tracking(_, phase, deadline) = state {
+                let prev = nextPhase.accrueAs == "break" ? (try? store.breakTaskId()) ?? -1 : -1
+                try? store.append(Event(
+                    id: nil, ts: 0, type: EventType.switch.rawValue,
+                    taskId: taskId, prevTaskId: prev,
+                    phaseId: phase.id, profileName: profileName,
+                    extendMin: nil, comment: comment))
+                state = .tracking(taskId: taskId, phase: phase, deadline: deadline)
+                activeTask = tasks.first(where: { $0.id == taskId })
+            }
+        }
+    }
+
+    func stop() {
+        if case .idle = state { return }
+        try? store.append(Event(
+            id: nil, ts: 0, type: EventType.stop.rawValue,
+            taskId: nil, prevTaskId: currentTaskId(),
+            phaseId: nil, profileName: profileName,
+            extendMin: nil, comment: nil))
+        iterator?.reset()
+        state = .idle
+        activeTask = nil
+    }
+
+    // Called from tick() when timer expires. Logs phase_arm, plays sound,
+    // accrual continues against current task.
+    private func armPhase(taskId: Int64, phase: Phase) {
+        guard let iter = iterator else { return }
+        let nextPhase = iter.peekNext()
+
+        try? store.append(Event(
+            id: nil, ts: 0, type: EventType.phaseArm.rawValue,
+            taskId: taskId, prevTaskId: nil,
+            phaseId: phase.id, profileName: profileName,
+            extendMin: nil, comment: nil))
+
+        Sounds.play(phase.onArm.sound)
+        state = .armed(taskId: taskId, phase: phase, nextPhase: nextPhase, armedAt: Date())
+    }
+
+    func advance(comment: String? = nil) {
+        guard case let .armed(taskId, _, nextPhase, _) = state,
+              let iter = iterator else { return }
+
+        _ = iter.advance()
+        let newPhase = iter.currentPhase
+        let deadline = Date().addingTimeInterval(Double(newPhase.durationMin * 60))
+
+        // Determine the task that accrues during the next phase.
+        // If next phase is a break, accrue to the synthetic break task.
+        let nextTaskId: Int64 = {
+            if newPhase.accrueAs == "break" {
+                return (try? store.breakTaskId()) ?? taskId
+            } else {
+                // Returning from break: resume the work task that was active
+                // before the break. We find it by walking back through events.
+                if newPhase.accrueAs == nil {
+                    return previousWorkTaskId() ?? taskId
+                }
+                return taskId
+            }
+        }()
+
+        try? store.append(Event(
+            id: nil, ts: 0, type: EventType.phaseAdvance.rawValue,
+            taskId: nextTaskId, prevTaskId: taskId,
+            phaseId: newPhase.id, profileName: profileName,
+            extendMin: nil, comment: comment))
+
+        state = .tracking(taskId: nextTaskId, phase: newPhase, deadline: deadline)
+        activeTask = tasks.first(where: { $0.id == nextTaskId })
+    }
+
+    func extend(minutes: Int, comment: String? = nil) {
+        guard case let .armed(taskId, phase, nextPhase, _) = state else { return }
+        let deadline = Date().addingTimeInterval(Double(minutes * 60))
+
+        try? store.append(Event(
+            id: nil, ts: 0, type: EventType.phaseExtend.rawValue,
+            taskId: taskId, prevTaskId: nil,
+            phaseId: phase.id, profileName: profileName,
+            extendMin: minutes, comment: comment))
+
+        // Return to tracking with new deadline; nextPhase is now stale but
+        // re-armed phase will recompute it.
+        _ = nextPhase
+        state = .tracking(taskId: taskId, phase: phase, deadline: deadline)
+    }
+
+    func setProfile(_ name: String) {
+        guard profiles.contains(where: { $0.name == name }), name != profileName else { return }
+        try? store.append(Event(
+            id: nil, ts: 0, type: EventType.profileChange.rawValue,
+            taskId: nil, prevTaskId: nil,
+            phaseId: nil, profileName: name,
+            extendMin: nil, comment: nil))
+        profileName = name
+        // Mid-cycle profile change resets the iterator. Could be smarter
+        // (carry the elapsed time forward), but reset is more predictable.
+        if let p = profile { iterator = CycleIterator(profile: p); iterator?.reset() }
+        // If we're tracking, restart the current phase on the new profile.
+        if case let .tracking(taskId, _, _) = state {
+            stop()
+            start(taskId: taskId)
+        }
+    }
+
+    func logInterruption(comment: String) {
+        try? store.append(Event(
+            id: nil, ts: 0, type: EventType.interruption.rawValue,
+            taskId: currentTaskId(), prevTaskId: nil,
+            phaseId: nil, profileName: profileName,
+            extendMin: nil, comment: comment))
+    }
+
+    func addTask(name: String, code: String?, category: String = "project") throws {
+        let t = Task(id: nil, name: name, code: code, category: category, archived: false)
+        _ = try store.upsertTask(t)
+        self.tasks = try store.tasks()
+    }
+
+    // MARK: - Helpers
+
+    private func currentTaskId() -> Int64? {
+        switch state {
+        case .idle: return nil
+        case let .tracking(id, _, _): return id
+        case let .armed(id, _, _, _): return id
+        }
+    }
+
+    // Walk back through events to find the most recent non-break task.
+    // Used when advancing out of a break phase back to work.
+    private func previousWorkTaskId() -> Int64? {
+        // Cheap: pull recent events, find last taskId whose task isn't break.
+        // For v1, use the activeTask we were on before the most recent
+        // phase_advance into break. Stored implicitly via state history —
+        // here we just query the DB.
+        // TODO: implement with a Store query. For now, return nil so caller
+        // falls back to current taskId. This means the first break→work
+        // transition will accrue to break task until user manually switches.
+        return nil
+    }
+}
