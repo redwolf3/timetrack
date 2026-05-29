@@ -17,7 +17,7 @@ public enum EventType: String, Codable {
     case reconcileBind = "reconcile_bind" // binds a loose task to a JIRA key
 }
 
-public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable {
+public struct Task: Codable, FetchableRecord, MutablePersistableRecord, Identifiable {
     public var id: Int64?
     public var name: String
     public var code: String?           // JIRA key, ticket id
@@ -32,6 +32,10 @@ public struct Task: Codable, FetchableRecord, PersistableRecord, Identifiable {
         self.code = code
         self.category = category
         self.archived = archived
+    }
+
+    public mutating func didInsert(_ inserted: InsertionSuccess) {
+        id = inserted.rowID
     }
 }
 
