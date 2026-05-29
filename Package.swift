@@ -21,9 +21,16 @@ let package = Package(
         .package(url: "https://github.com/soffes/HotKey.git", from: "0.2.1")
     ],
     targets: [
+        // Pure-C target providing __attribute__((weak)) stubs for
+        // sqlite3_snapshot_* symbols absent in Ubuntu's libsqlite3.
+        // SPM requires Swift and C sources to live in separate targets.
+        .target(
+            name: "SQLiteSnapshotStubs",
+            publicHeadersPath: "."),
         .target(
             name: "TimeTrackKit",
             dependencies: [
+                "SQLiteSnapshotStubs",
                 .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "Yams", package: "Yams")
             ]),
