@@ -52,13 +52,18 @@ public final class Tracker {
     // rather than growing the buffer without bound.
     // TODO (PR#1, Phase 5): revisit if effects must be lossless (e.g. audit log).
     public let effectStream: AsyncStream<Effect>
-    private let stateContinuation: AsyncStream<TrackerState>.Continuation
-    private let effectContinuation: AsyncStream<Effect>.Continuation
+    // nonisolated(unsafe): deinit is always nonisolated (SE-0371 / Swift 5.10).
+    // Accessing @MainActor-isolated stored properties from deinit is a compile
+    // error, so we mark the three properties needed for cleanup as
+    // nonisolated(unsafe).  This is safe: deinit only runs after all strong
+    // references are released, so there is no concurrent actor access.
+    nonisolated(unsafe) private let stateContinuation: AsyncStream<TrackerState>.Continuation
+    nonisolated(unsafe) private let effectContinuation: AsyncStream<Effect>.Continuation
 
     private let store: Store
     private var iterator: CycleIterator?
     private var profile: Profile? { profiles.first(where: { $0.name == profileName }) }
-    private var tickTimer: Timer?
+    nonisolated(unsafe) private var tickTimer: Timer?
 
     public init(store: Store, profilesURL: URL) throws {
         // Wire the streams BEFORE any state mutation (didSet must have a live
@@ -77,13 +82,19 @@ public final class Tracker {
         startTickLoop()
     }
 
+    deinit {
+        tickTimer?.invalidate()
+        stateContinuation.finish()
+        effectContinuation.finish()
+    }
+
     // 1Hz tick: checks for phase expiry, refreshes today's totals.
     private func startTickLoop() {
         // TODO (PR#1, Phase 5): Timer.scheduledTimer requires an active RunLoop and
         // MainActor.assumeIsolated will precondition-fail if the RunLoop fires on a
         // non-main thread (possible on Linux where Foundation's RunLoop is
         // Dispatch-backed but not necessarily the main-actor executor).
-        // Fix: replace with a Task { while !Task.isCancelled { try await clock.sleep(for: .seconds(1)); tick() } }.
+        // Fix: replace with a Task { while !Task.isCancelled { try await clock.sleep(for: .seconds(1)); tick(at: Date()) } }.
         tickTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick(at: Date()) }
         }

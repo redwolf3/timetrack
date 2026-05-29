@@ -1,7 +1,7 @@
 // Weak-linked fallback symbols for sqlite3_snapshot_* APIs.
 //
 // Ubuntu's system libsqlite3 is not compiled with SQLITE_ENABLE_SNAPSHOT, so
-// sqlite3_snapshot_{get,open,free,cmp} are absent from the shared library.
+// sqlite3_snapshot_{get,open,free,cmp,recover} are absent from the shared library.
 // GRDB 6 (DatabaseSnapshotPool / WALSnapshot) references them at link time
 // even though TimeTrackKit never instantiates those classes.
 //
@@ -11,9 +11,10 @@
 // entered.  We use opaque void* so this file needs no sqlite3.h include and
 // cannot accidentally conflict with a real header declaration.
 //
-// If this file is ever reached at runtime it means DatabaseSnapshotPool is
-// being used on a SQLite that lacks snapshot support — GRDB would return
-// SQLITE_ERROR anyway, so returning 1 (SQLITE_ERROR) is correct behaviour.
+// If a stub is reached at runtime it means DatabaseSnapshotPool is being used
+// on a SQLite that lacks snapshot support.  Each stub mimics the least-harmful
+// behaviour: int-returning functions return 1 (SQLITE_ERROR), void functions
+// are no-ops, and cmp returns 0 (equal) so callers don't crash on the result.
 
 __attribute__((weak))
 int sqlite3_snapshot_get(void *db, const char *zSchema, void **ppSnapshot) {
