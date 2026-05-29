@@ -42,8 +42,8 @@ func monitorTick(
     profile: Profile,
     taskId: Int64 = 1,
     phaseId: String = "work",
-    isBreakPhase: Bool = false,
     armBoundary: Date? = nil,
+    isBreakPhase: Bool = false,
     breakTaskId: Int64 = 99
 ) -> IdleMonitor.Signal {
     source.set(idleSec)
