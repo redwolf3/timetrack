@@ -17,13 +17,6 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "6.29.0"),
-        // GRDBCustomSQLite bundles its own SQLite amalgamation compiled with
-        // SQLITE_ENABLE_SNAPSHOT (and other extras). The standard GRDB product
-        // links against the system libsqlite3, which on Ubuntu lacks
-        // SQLITE_ENABLE_SNAPSHOT, causing undefined-reference linker errors for
-        // WALSnapshot and DatabaseSnapshotPool. Switching here keeps the public
-        // API identical — Store.swift still does `import GRDB`.
-        .package(url: "https://github.com/groue/SQLiteCustom.swift.git", from: "0.0.2"),
         .package(url: "https://github.com/jpsim/Yams.git", from: "5.1.0"),
         .package(url: "https://github.com/soffes/HotKey.git", from: "0.2.1")
     ],
@@ -31,8 +24,7 @@ let package = Package(
         .target(
             name: "TimeTrackKit",
             dependencies: [
-                .product(name: "GRDBCustomSQLite", package: "GRDB.swift"),
-                .product(name: "SQLiteCustom", package: "SQLiteCustom.swift"),
+                .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "Yams", package: "Yams")
             ]),
         .executableTarget(
