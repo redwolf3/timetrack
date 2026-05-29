@@ -77,14 +77,6 @@ public final class Tracker {
         startTickLoop()
     }
 
-    deinit {
-        // Signal stream termination so any awaiting subscriber unblocks cleanly.
-        // AsyncStream.Continuation is sendable and safe to finish from any thread.
-        tickTimer?.invalidate()
-        stateContinuation.finish()
-        effectContinuation.finish()
-    }
-
     // 1Hz tick: checks for phase expiry, refreshes today's totals.
     private func startTickLoop() {
         // TODO (PR#1, Phase 5): Timer.scheduledTimer requires an active RunLoop and
