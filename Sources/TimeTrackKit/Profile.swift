@@ -67,7 +67,7 @@ public struct EscalationConfig: Codable {
 // A rung fires once cumulative active-seconds-since-trigger crosses afterActiveSec.
 // repeatNotifySec (if set) re-posts the notification on that cadence while still
 // active and unresolved — this is the permanent ceiling, never a modal.
-public struct EscalationRung: Codable {
+public struct EscalationRung: Codable, Equatable {
     public let afterActiveSec: Int
     public let sound: String?
     public let color: String

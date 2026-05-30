@@ -5,8 +5,8 @@ import Foundation
 //   .overrun  = [armBoundary, return]    — past the unacked boundary
 // If the phase was already armed when idle began, inPhase collapses (zero-length)
 // and the whole episode is a single overrun segment.
-public struct IdleSegment: Identifiable {
-    public enum Kind { case inPhase, overrun }
+public struct IdleSegment: Identifiable, Equatable {
+    public enum Kind: Equatable { case inPhase, overrun }
     public let id = UUID()
     public let kind: Kind
     public let start: Date
@@ -50,7 +50,7 @@ public final class IdleMonitor {
     private var lastTickActive = true
 
     // Returns an action for the Tracker to execute, if any.
-    public enum Signal {
+    public enum Signal: Equatable {
         case none
         case idleDetected(start: Date)         // crossed threshold; freeze phase
         case returned(segments: [IdleSegment]) // build prompt for these
