@@ -24,26 +24,13 @@ final class ReconcileGateTests: XCTestCase {
             taskId: taskId, prevTaskId: nil, phaseId: nil, profileName: nil,
             extendMin: nil, comment: nil))
         try store.append(Event(id: nil, ts: t1, type: EventType.stop.rawValue,
-            taskId: taskId, prevTaskId: nil, phaseId: nil, profileName: nil,
+            taskId: nil, prevTaskId: taskId, phaseId: nil, profileName: nil,
             extendMin: nil, comment: nil))
     }
 
     private func todayWindow() -> (from: Date, to: Date) {
         let today = Calendar.current.startOfDay(for: Date())
         return (today, today)
-    }
-
-    // addKnownTask uses PersistableRecord (not MutablePersistableRecord), so the
-    // returned struct's id is nil. Fetch back the most-recently-inserted record
-    // (ordered descending by createdTs) to get the real id.
-    private func addKnownTaskWithId(
-        store: Store,
-        jiraKey: String?,
-        description: String
-    ) throws -> KnownTask {
-        try store.addKnownTask(jiraKey: jiraKey, description: description)
-        let all = try store.knownTasks(activeOnly: false)
-        return try XCTUnwrap(all.first, "Expected at least one KnownTask after insert")
     }
 
     // MARK: - Tests
@@ -80,7 +67,7 @@ final class ReconcileGateTests: XCTestCase {
         let taskId = task.id!
 
         // jiraKey nil → provisional == true
-        let kt = try addKnownTaskWithId(store: store, jiraKey: nil, description: "WIP entry")
+        let kt = try store.addKnownTask(jiraKey: nil, description: "WIP entry")
         let ktId = try XCTUnwrap(kt.id)
         try store.bind(taskId: taskId, knownTaskId: ktId, comment: nil)
 
@@ -107,7 +94,7 @@ final class ReconcileGateTests: XCTestCase {
         let taskId = task.id!
 
         // jiraKey non-nil → provisional == false
-        let kt = try addKnownTaskWithId(store: store, jiraKey: "ABC-1", description: "Known work")
+        let kt = try store.addKnownTask(jiraKey: "ABC-1", description: "Known work")
         try store.bind(taskId: taskId, knownTaskId: try XCTUnwrap(kt.id), comment: nil)
 
         let (from, to) = todayWindow()
@@ -130,8 +117,6 @@ final class ReconcileGateTests: XCTestCase {
         try appendOneHour(store: store, taskId: breakId, day: from)
 
         // No project tasks at all — gate should pass, returning empty rows.
-        XCTAssertNoThrow(try store.reconciledReport(from: from, to: to),
-            "Break-only time should not block reconciledReport")
         let rows = try store.reconciledReport(from: from, to: to)
         XCTAssertTrue(rows.isEmpty, "Break time produces no reportable rows")
     }

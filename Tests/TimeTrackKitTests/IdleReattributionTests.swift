@@ -225,7 +225,7 @@ final class IdleReattributionTests: XCTestCase {
 
     // MARK: - 5. Two non-overlapping resolves on the same task are independent
 
-    func testSegmentsAreDeletionIdempotentAcrossMultipleResolves() throws {
+    func testTwoNonOverlappingResolvesAreEachApplied() throws {
         let dir = try makeTmpDir()
         let store = try makeStore(in: dir)
 
