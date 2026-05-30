@@ -127,7 +127,14 @@ public final class Store {
 
         var config = Configuration()
         config.foreignKeysEnabled = true
+        // Wait up to 5 s on busy — allows the CLI and app to share the DB safely.
+        config.busyMode = .timeout(5)
         self.dbQueue = try DatabaseQueue(path: url.path, configuration: config)
+        // WAL journal: readers never block writers, so CLI reads and app writes
+        // can proceed concurrently without one blocking the other.
+        try self.dbQueue.write { db in
+            try db.execute(sql: "PRAGMA journal_mode = WAL")
+        }
         try migrate()
         try ensureBreakTask()
     }
@@ -515,5 +522,64 @@ public final class Store {
             return byKey.map { ReconciledRow(jiraKey: $0.key, totalSeconds: $0.value) }
                 .sorted { $0.totalSeconds > $1.totalSeconds }
         }
+    }
+
+    // MARK: - Current status (for CLI)
+    //
+    // Reconstructs the in-flight tracking state from the event log without
+    // needing in-memory Tracker state. The CLI starts fresh on each invocation
+    // so it can't rely on an in-memory state machine.
+
+    public enum TrackingStatus {
+        case idle
+        case tracking(task: Task, since: Date)
+        case armed(task: Task, phase: String, since: Date)
+    }
+
+    public func currentStatus() throws -> TrackingStatus {
+        // Only these event types change what's being tracked or whether we're tracking.
+        let stateTypes = [
+            EventType.start.rawValue,
+            EventType.stop.rawValue,
+            EventType.switch.rawValue,
+            EventType.phaseAdvance.rawValue,
+            EventType.phaseExtend.rawValue,
+            EventType.phaseArm.rawValue,
+        ]
+        return try dbQueue.read { db in
+            guard let last = try Event
+                .filter(stateTypes.contains(Column("type")))
+                .order(Column("ts").desc)
+                .fetchOne(db)
+            else { return .idle }
+
+            switch EventType(rawValue: last.type) {
+            case .stop, .none:
+                return .idle
+            case .phaseArm:
+                guard let tid = last.taskId,
+                      let task = try Task.fetchOne(db, key: tid) else { return .idle }
+                let since = try taskStartDate(for: tid, db: db)
+                return .armed(task: task, phase: last.phaseId ?? "work", since: since)
+            default:
+                guard let tid = last.taskId,
+                      let task = try Task.fetchOne(db, key: tid) else { return .idle }
+                let since = try taskStartDate(for: tid, db: db)
+                return .tracking(task: task, since: since)
+            }
+        }
+    }
+
+    // Most recent start or switch that established the given task as active.
+    // Used to compute elapsed time in status display.
+    private func taskStartDate(for taskId: Int64, db: Database) throws -> Date {
+        let startTypes = [EventType.start.rawValue, EventType.switch.rawValue]
+        let e = try Event
+            .filter(startTypes.contains(Column("type")))
+            .filter(Column("taskId") == taskId)
+            .order(Column("ts").desc)
+            .fetchOne(db)
+        let ms = e?.ts ?? Int64(Date().timeIntervalSince1970 * 1000)
+        return Date(timeIntervalSince1970: Double(ms) / 1000.0)
     }
 }

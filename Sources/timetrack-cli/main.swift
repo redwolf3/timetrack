@@ -1,8 +1,19 @@
 import Foundation
 import TimeTrackKit
 
-// Phase 4 builds the CLI here: a thin client over TimeTrackKit opening the same
-// events.db (WAL mode; see CLAUDE.md two-process caveat).
-// Commands: start | stop | switch | status | report | known | reconcile.
-// Placeholder so the target exists; do not implement before Phase 4.
-print("timetrack-cli not yet implemented — see INITIAL_PROMPT.md Phase 4")
+// Dispatch onto the main actor and keep the RunLoop alive until exit() is called.
+// All Store operations are synchronous; the Task executes and then calls exit(0).
+// The @MainActor annotation is included for forward-compatibility with Tracker use.
+Task { @MainActor in
+    do {
+        try CLI.run(args: Array(CommandLine.arguments.dropFirst()))
+    } catch let e as CLIError {
+        fputs("error: \(e.description)\n", stderr)
+        exit(1)
+    } catch {
+        fputs("error: \(error)\n", stderr)
+        exit(1)
+    }
+    exit(0)
+}
+dispatchMain()

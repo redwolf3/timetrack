@@ -22,6 +22,11 @@ jobs:
       - name: Build TimeTrackKit
         run: swift build --target TimeTrackKit
 
+      # Build the CLI target — it depends only on TimeTrackKit and Foundation,
+      # so it must compile on Linux (no AppKit/HotKey/Combine).
+      - name: Build timetrack CLI
+        run: swift build --target timetrack-cli
+
       # swift test builds TimeTrackKitTests (+ its TimeTrackKit dep) and runs
       # all test cases.  It does NOT build TimeTrackApp or timetrack-cli.
       - name: Run tests
