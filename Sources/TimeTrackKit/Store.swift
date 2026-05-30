@@ -45,7 +45,7 @@ public struct Task: Codable, FetchableRecord, MutablePersistableRecord, Identifi
 // final report until promoted. "Overhead" is not a property here — time is
 // overhead purely by virtue of being bound to the overhead JIRA, which is an
 // ordinary registry entry.
-public struct KnownTask: Codable, FetchableRecord, PersistableRecord, Identifiable {
+public struct KnownTask: Codable, FetchableRecord, MutablePersistableRecord, Identifiable {
     public var id: Int64?
     public var jiraKey: String?        // nil iff provisional
     public var description: String
@@ -54,6 +54,10 @@ public struct KnownTask: Codable, FetchableRecord, PersistableRecord, Identifiab
     public var createdTs: Int64
 
     public static let databaseTableName = "known_tasks"
+
+    public mutating func didInsert(_ inserted: InsertionSuccess) {
+        id = inserted.rowID
+    }
 
     public init(id: Int64?, jiraKey: String?, description: String,
                 provisional: Bool, retired: Bool, createdTs: Int64) {
