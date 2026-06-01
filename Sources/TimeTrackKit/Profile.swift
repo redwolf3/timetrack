@@ -43,6 +43,39 @@ public struct Profile: Codable {
     // with unresolved segments — ramp hard). Both presence-gated: rungs only
     // advance on detected activity-seconds since the trigger, never on wall clock.
     public let escalation: EscalationConfig?
+
+    // The phase that follows `currentPhaseId` when advancing the cycle once,
+    // i.e. the destination of an ARMED → advance/ack. This mirrors what a fresh
+    // CycleIterator would return from advance() when its index sits on
+    // currentPhaseId on a NON-long cycle: it walks the base `cycle` and wraps to
+    // the first phase. Returns nil only if currentPhaseId isn't in the cycle.
+    //
+    // Why base-cycle only: the long-cycle override (every Nth iteration) depends
+    // on the iterator's running cycle-number, which is in-memory state the
+    // stateless CLI cannot reconstruct from the event log without replaying the
+    // whole stream. The common, non-Nth case is exactly the base cycle, so the
+    // CLI uses this to emit a canonical phase_advance for switch-from-ARMED.
+    // (The in-process app keeps the live CycleIterator and is unaffected.)
+    //
+    // Override-aware fallback: this is now the LEGACY path for switch-from-ARMED
+    // (when an arm event predates nextPhaseId). If currentPhaseId is an OVERRIDE
+    // phase (present in longCycleOverride but not in `cycle`, e.g. long_break),
+    // the only sensible single-step successor is the start of the next cycle —
+    // cycle[0] — since the override always sits at the cycle's tail. Without this
+    // a legacy long_break arm would return nil and hard-error.
+    public func phaseAfter(currentPhaseId: String) -> Phase? {
+        guard let idx = cycle.firstIndex(where: { $0.id == currentPhaseId }) else {
+            // Not in the base cycle. If it's an override phase, the cycle wraps
+            // back to its first phase; otherwise it's truly unknown.
+            if let override = longCycleOverride,
+               override.contains(where: { $0.id == currentPhaseId }) {
+                return cycle.first
+            }
+            return nil
+        }
+        let nextIdx = (idx + 1) % cycle.count
+        return cycle[nextIdx]
+    }
 }
 
 public struct EscalationConfig: Codable {
@@ -141,8 +174,10 @@ final class CycleIterator {
 }
 
 // Loads profiles.yaml from the app support directory, or seeds defaults.
-enum ProfileLoader {
-    static func loadAll(from url: URL) throws -> [Profile] {
+// Public so the stateless CLI can load the same profile set the app uses when
+// it must reconstruct phase math from the event log (e.g. switch-from-ARMED).
+public enum ProfileLoader {
+    public static func loadAll(from url: URL) throws -> [Profile] {
         if !FileManager.default.fileExists(atPath: url.path) {
             try seedDefaults(to: url)
         }

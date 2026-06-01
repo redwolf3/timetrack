@@ -92,6 +92,13 @@ public struct Event: Codable, FetchableRecord, PersistableRecord {
     // time is overhead iff bound to the overhead JIRA.
     public var knownTaskId: Int64? = nil
     public var jiraKey: String? = nil   // unused for binds; kept for future raw-key paths
+    // For phase_arm ONLY: the phase id that advance() WOULD transition into from
+    // this armed boundary — i.e. the live CycleIterator's peekNext (including the
+    // long-cycle override, e.g. long_break, or the wrap-back-to-work). Recorded at
+    // arm time so the stateless CLI can read the exact next phase instead of
+    // recomputing it (it has no live iterator to reproduce cycle-number state).
+    // nil on every other event type.
+    public var nextPhaseId: String? = nil
 
     public static let databaseTableName = "events"
 
@@ -100,7 +107,8 @@ public struct Event: Codable, FetchableRecord, PersistableRecord {
                 phaseId: String?, profileName: String?,
                 extendMin: Int?, comment: String?,
                 rangeStart: Int64? = nil, rangeEnd: Int64? = nil,
-                knownTaskId: Int64? = nil, jiraKey: String? = nil) {
+                knownTaskId: Int64? = nil, jiraKey: String? = nil,
+                nextPhaseId: String? = nil) {
         self.id = id
         self.ts = ts
         self.type = type
@@ -114,6 +122,7 @@ public struct Event: Codable, FetchableRecord, PersistableRecord {
         self.rangeEnd = rangeEnd
         self.knownTaskId = knownTaskId
         self.jiraKey = jiraKey
+        self.nextPhaseId = nextPhaseId
     }
 }
 
@@ -127,6 +136,14 @@ public final class Store {
 
         var config = Configuration()
         config.foreignKeysEnabled = true
+        // WAL journal: enables safe CROSS-PROCESS sharing (CLI + app) alongside
+        // the busy-timeout — SQLite serializes in-process; WAL lets a concurrent
+        // reader (app) and writer (CLI) proceed without one blocking the other.
+        // Must be set on Configuration BEFORE opening the DatabaseQueue; SQLite
+        // forbids switching journal_mode inside a transaction (which write{} uses).
+        config.journalMode = .wal
+        // Wait up to 5 s on busy — allows the CLI and app to share the DB safely.
+        config.busyMode = .timeout(5)
         self.dbQueue = try DatabaseQueue(path: url.path, configuration: config)
         try migrate()
         try ensureBreakTask()
@@ -173,6 +190,15 @@ public final class Store {
             }
         }
 
+        // Records, on each phase_arm, the phase advance() would transition into,
+        // so the stateless CLI reads it instead of recomputing. NULLABLE add via a
+        // NEW migration step — existing DBs upgrade cleanly (no row mutation).
+        migrator.registerMigration("v3_event_next_phase") { db in
+            try db.alter(table: "events") { t in
+                t.add(column: "nextPhaseId", .text)
+            }
+        }
+
         try migrator.migrate(dbQueue)
     }
 
@@ -207,6 +233,26 @@ public final class Store {
         }
     }
 
+    // Tasks that a user may reference by name or id — excludes synthetic/system
+    // categories (currently only "break"). This is the single chokepoint for
+    // "which tasks are user-reachable via CLI resolvers": `start`, `switch`, and
+    // `bind` must use this, never the unfiltered `tasks()`, so the internal break
+    // task cannot be reached by accident and cause silent time loss.
+    //
+    // The internal break machinery (ensureBreakTask, breakTaskId, phase_advance,
+    // report, reconcile) continues to call tasks()/breakTaskId() directly —
+    // only user-facing CLI resolution is restricted here.
+    public func userTasks(includeArchived: Bool = false) throws -> [Task] {
+        try dbQueue.read { db in
+            var req = Task.filter(Column("category") != "break")
+                         .order(Column("name"))
+            if !includeArchived {
+                req = req.filter(Column("archived") == false)
+            }
+            return try req.fetchAll(db)
+        }
+    }
+
     public func upsertTask(_ task: Task) throws -> Task {
         try dbQueue.write { db in
             var t = task
@@ -225,6 +271,142 @@ public final class Store {
             try e.insert(db)
             return e
         }
+    }
+
+    // Returns all events in insertion order.  Internal visibility so @testable
+    // import can use it in unit tests without exposing the raw DatabaseQueue.
+    func readAllEventsInternal() throws -> [Event] {
+        try dbQueue.read { db in
+            try Event.order(Column("ts").asc, Column("id").asc).fetchAll(db)
+        }
+    }
+
+    // Raised when a switch-from-ARMED cannot determine the next phase: the arm
+    // event recorded no resolvable nextPhaseId AND the armed phase id is absent
+    // from the profile's base cycle (so even the legacy fallback fails).
+    public enum SwitchFromArmedError: Error, CustomStringConvertible {
+        case unresolvableNextPhase(armedPhaseId: String, profileName: String)
+
+        public var description: String {
+            switch self {
+            case let .unresolvableNextPhase(phase, profile):
+                return "armed phase '\(phase)' not found in profile '\(profile)'; cannot advance"
+            }
+        }
+    }
+
+    // MARK: - Shared accrual-task decision
+    //
+    // SINGLE source of truth for "which task accrues during the next phase",
+    // shared by Tracker.advance() (in-process) and switchFromArmed (stateless
+    // CLI) so the two can NEVER diverge — especially once previousWorkTaskId()
+    // is implemented. Mirrors Tracker.advance()'s exact current behavior:
+    //   - break phase (accrueAs == "break")  -> the synthetic break task
+    //   - returning from break (accrueAs == nil) -> previousWorkTaskId ?? carried
+    //   - otherwise (a named work phase)      -> the carried task
+    // `carriedTaskId` is the task active at the armed boundary (advance: the armed
+    // taskId; switchFromArmed: armedTaskId). `previousWorkTaskId` is the resumed
+    // work task when leaving a break; nil today (stub) so the fallback is carried.
+    public func accrualTaskId(forNextPhase nextPhase: Phase,
+                              carriedTaskId: Int64,
+                              previousWorkTaskId: Int64?) throws -> Int64 {
+        if nextPhase.accrueAs == "break" {
+            return try breakTaskId()
+        }
+        if nextPhase.accrueAs == nil {
+            // Returning from break: resume the prior work task, else carry on.
+            return previousWorkTaskId ?? carriedTaskId
+        }
+        return carriedTaskId
+    }
+
+    // MARK: - Switch from ARMED (canonical implicit-ack)
+    //
+    // DESIGN.md state machine: "ARMED → switch → implicit ack, then switch".
+    // Tracker.switchTo performs this in-process by calling advance() (which
+    // appends a phase_advance) and THEN appending the switch off the advanced
+    // accrual task. The stateless CLI has no live CycleIterator, so it reads the
+    // exact next phase recorded on the latest phase_arm event (nextPhaseId) and
+    // resolves it against the loaded profile (base cycle OR longCycleOverride),
+    // then emits the SAME two-event sequence, keeping the log faithful to the
+    // machine — including the long-cycle override (e.g. long_break) that
+    // Profile.phaseAfter alone cannot reproduce.
+    //
+    // Legacy fallback: phase_arm events written before nextPhaseId existed carry
+    // nil; for those we fall back to Profile.phaseAfter (now override-aware), so
+    // even a legacy long_break arm advances sanely instead of hard-erroring.
+    //
+    // The accrual task is decided by the shared accrualTaskId() helper so it can
+    // never drift from Tracker.advance().
+    //
+    // Append-only: two new events, no mutation.
+    public func switchFromArmed(armedTaskId: Int64,
+                                armedPhaseId: String,
+                                targetTaskId: Int64,
+                                profile: Profile,
+                                comment: String? = nil) throws {
+        // Read the next phase recorded at arm time. nextPhaseId is set ONLY on
+        // phase_arm events, so we look at the most recent one.
+        let recordedNextId = try dbQueue.read { db in
+            try Event
+                .filter(Column("type") == EventType.phaseArm.rawValue)
+                .order(Column("ts").desc, Column("id").desc)
+                .fetchOne(db)?
+                .nextPhaseId
+        }
+
+        let nextPhase: Phase
+        if let nextId = recordedNextId,
+           let resolved = resolvePhase(id: nextId, in: profile) {
+            // Authoritative path: the arm event told us exactly where advance()
+            // would go, including the long-cycle override (e.g. long_break).
+            nextPhase = resolved
+        } else if let fallback = profile.phaseAfter(currentPhaseId: armedPhaseId) {
+            // Legacy fallback: arm event predates nextPhaseId (nil) — or recorded
+            // an id we can't resolve. phaseAfter is now override-aware so an
+            // override phase (e.g. long_break) resolves to cycle[0] rather than
+            // hard-erroring.
+            nextPhase = fallback
+        } else {
+            // No recorded next phase AND no base-cycle successor — the armed
+            // phase id isn't in this profile at all. Surface explicitly rather
+            // than silently no-op'ing.
+            throw SwitchFromArmedError.unresolvableNextPhase(
+                armedPhaseId: armedPhaseId, profileName: profile.name)
+        }
+
+        let accrualTaskId = try accrualTaskId(
+            forNextPhase: nextPhase,
+            carriedTaskId: armedTaskId,
+            // Mirrors advance(): previousWorkTaskId() is a nil-returning stub
+            // today, so this is nil here too — keep them identical.
+            previousWorkTaskId: nil)
+
+        // 1) Implicit ack: phase_advance onto the next phase's accrual task.
+        try append(Event(
+            id: nil, ts: 0, type: EventType.phaseAdvance.rawValue,
+            taskId: accrualTaskId, prevTaskId: armedTaskId,
+            phaseId: nextPhase.id, profileName: profile.name,
+            extendMin: nil, comment: comment))
+
+        // 2) The switch itself, off the just-advanced accrual task. Its
+        // prevTaskId must be the advanced accrual task (a valid FK) — never the
+        // armed task — so reconstruction sees: armed → advance → switch.
+        try append(Event(
+            id: nil, ts: 0, type: EventType.switch.rawValue,
+            taskId: targetTaskId, prevTaskId: accrualTaskId,
+            phaseId: nextPhase.id, profileName: profile.name,
+            extendMin: nil, comment: comment))
+    }
+
+    // Resolve a phase id to its Phase by searching the profile's BASE cycle and
+    // its longCycleOverride. The override is essential: a phase like long_break
+    // exists ONLY in longCycleOverride for the pomodoro profile, so a base-cycle
+    // search alone would miss it and force a hard error on switch-from-ARMED.
+    private func resolvePhase(id: String, in profile: Profile) -> Phase? {
+        if let p = profile.cycle.first(where: { $0.id == id }) { return p }
+        if let p = profile.longCycleOverride?.first(where: { $0.id == id }) { return p }
+        return nil
     }
 
     // MARK: - Reporting
@@ -251,12 +433,12 @@ public final class Store {
             // event (to know what was active at midnight).
             let prior = try Event
                 .filter(Column("ts") < startMs)
-                .order(Column("ts").desc)
+                .order(Column("ts").desc, Column("id").desc)
                 .fetchOne(db)
 
             let today = try Event
                 .filter(Column("ts") >= startMs && Column("ts") < endMs)
-                .order(Column("ts"))
+                .order(Column("ts").asc, Column("id").asc)
                 .fetchAll(db)
 
             var totals: [Int64: Int] = [:]   // taskId -> seconds
@@ -373,22 +555,28 @@ public final class Store {
     // Promote a provisional entry by attaching its real JIRA key. Because binds
     // reference the registry id (not the key), every prior binding to this entry
     // now resolves to the real key automatically — no re-binding.
-    public func promoteKnownTask(id: Int64, jiraKey: String) throws {
+    @discardableResult
+    public func promoteKnownTask(id: Int64, jiraKey: String) throws -> Bool {
         try dbQueue.write { db in
             if var k = try KnownTask.fetchOne(db, key: id) {
                 k.jiraKey = jiraKey
                 k.provisional = false
                 try k.update(db)
+                return true
             }
+            return false
         }
     }
 
-    public func retireKnownTask(id: Int64) throws {
+    @discardableResult
+    public func retireKnownTask(id: Int64) throws -> Bool {
         try dbQueue.write { db in
             if var k = try KnownTask.fetchOne(db, key: id) {
                 k.retired = true
                 try k.update(db)
+                return true
             }
+            return false
         }
     }
 
@@ -515,5 +703,89 @@ public final class Store {
             return byKey.map { ReconciledRow(jiraKey: $0.key, totalSeconds: $0.value) }
                 .sorted { $0.totalSeconds > $1.totalSeconds }
         }
+    }
+
+    // MARK: - Current status (for CLI)
+    //
+    // Reconstructs the in-flight tracking state from the event log without
+    // needing in-memory Tracker state. The CLI starts fresh on each invocation
+    // so it can't rely on an in-memory state machine.
+
+    public enum TrackingStatus {
+        case idle
+        case tracking(task: Task, since: Date)
+        case armed(task: Task, phase: String, since: Date)
+    }
+
+    public func currentStatus() throws -> TrackingStatus {
+        // Only these event types change what's being tracked or whether we're tracking.
+        let stateTypes = [
+            EventType.start.rawValue,
+            EventType.stop.rawValue,
+            EventType.switch.rawValue,
+            EventType.phaseAdvance.rawValue,
+            EventType.phaseExtend.rawValue,
+            EventType.phaseArm.rawValue,
+        ]
+        return try dbQueue.read { db in
+            guard let last = try Event
+                .filter(stateTypes.contains(Column("type")))
+                .order(Column("ts").desc, Column("id").desc)
+                .fetchOne(db)
+            else { return .idle }
+
+            switch EventType(rawValue: last.type) {
+            case .stop, .none:
+                return .idle
+            case .phaseArm:
+                guard let tid = last.taskId,
+                      let task = try Task.fetchOne(db, key: tid) else { return .idle }
+                let since = try taskStartDate(for: tid, db: db)
+                return .armed(task: task, phase: last.phaseId ?? "work", since: since)
+            case .phaseAdvance:
+                // A phase_advance sets a new active task (often a break task that has no
+                // start/switch row). Derive 'since' from the phase_advance event's own ts
+                // — that is the moment the phase began. taskStartDate() would find no
+                // start/switch for the break task and fall back to now(), giving a
+                // misleading 0s elapsed.
+                guard let tid = last.taskId,
+                      let task = try Task.fetchOne(db, key: tid) else { return .idle }
+                let since = Date(timeIntervalSince1970: Double(last.ts) / 1000.0)
+                return .tracking(task: task, since: since)
+            default:
+                guard let tid = last.taskId,
+                      let task = try Task.fetchOne(db, key: tid) else { return .idle }
+                let since = try taskStartDate(for: tid, db: db)
+                return .tracking(task: task, since: since)
+            }
+        }
+    }
+
+    // The profile in effect, read from the event log: the most recent event
+    // carrying a non-nil profileName. start/phase_arm/phase_advance all stamp it
+    // (and profile_change explicitly). Returns nil if nothing in the log names a
+    // profile (legacy/CLI-only rows), letting the caller fall back to "default".
+    // The stateless CLI uses this to load the right profile for switch-from-ARMED.
+    public func currentProfileName() throws -> String? {
+        try dbQueue.read { db in
+            try Event
+                .filter(Column("profileName") != nil)
+                .order(Column("ts").desc, Column("id").desc)
+                .fetchOne(db)?
+                .profileName
+        }
+    }
+
+    // Most recent start or switch that established the given task as active.
+    // Used to compute elapsed time in status display.
+    private func taskStartDate(for taskId: Int64, db: Database) throws -> Date {
+        let startTypes = [EventType.start.rawValue, EventType.switch.rawValue]
+        let e = try Event
+            .filter(startTypes.contains(Column("type")))
+            .filter(Column("taskId") == taskId)
+            .order(Column("ts").desc, Column("id").desc)
+            .fetchOne(db)
+        let ms = e?.ts ?? Int64(Date().timeIntervalSince1970 * 1000)
+        return Date(timeIntervalSince1970: Double(ms) / 1000.0)
     }
 }

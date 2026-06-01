@@ -12,6 +12,10 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .library(name: "TimeTrackKit", targets: ["TimeTrackKit"]),
+        // CLI logic lives in a library so a test target can import it; SwiftPM
+        // executable targets are not importable by tests. The `timetrack`
+        // executable is a thin shell over this.
+        .library(name: "TimeTrackCLICore", targets: ["TimeTrackCLICore"]),
         .executable(name: "TimeTrackApp", targets: ["TimeTrackApp"]),
         .executable(name: "timetrack", targets: ["timetrack-cli"])
     ],
@@ -40,11 +44,19 @@ let package = Package(
                 "TimeTrackKit",
                 .product(name: "HotKey", package: "HotKey")
             ]),
+        // Importable CLI command logic (testable). Platform-agnostic like the
+        // kit it wraps: Foundation + TimeTrackKit only, no AppKit/SwiftUI.
+        .target(
+            name: "TimeTrackCLICore",
+            dependencies: ["TimeTrackKit"]),
         .executableTarget(
             name: "timetrack-cli",
-            dependencies: ["TimeTrackKit"]),
+            dependencies: ["TimeTrackCLICore"]),
         .testTarget(
             name: "TimeTrackKitTests",
-            dependencies: ["TimeTrackKit"])
+            dependencies: ["TimeTrackKit"]),
+        .testTarget(
+            name: "TimeTrackCLICoreTests",
+            dependencies: ["TimeTrackCLICore", "TimeTrackKit"])
     ]
 )
