@@ -188,13 +188,19 @@ public final class Tracker {
     // effect for the app to play, accrual continues against current task.
     private func armPhase(taskId: Int64, phase: Phase) {
         guard let iter = iterator else { return }
+        // peekNext() is exactly what advance() transitions into from here: both
+        // resolve through the same phasesForCurrentCycle()/wrap logic, so this is
+        // the long-cycle override phase (e.g. long_break) or the wrap-back-to-work
+        // when applicable. Record it on the arm event so the stateless CLI can read
+        // the next phase without reconstructing the iterator's cycle-number state.
         let nextPhase = iter.peekNext()
 
         try? store.append(Event(
             id: nil, ts: 0, type: EventType.phaseArm.rawValue,
             taskId: taskId, prevTaskId: nil,
             phaseId: phase.id, profileName: profileName,
-            extendMin: nil, comment: nil))
+            extendMin: nil, comment: nil,
+            nextPhaseId: nextPhase.id))
 
         effectContinuation.yield(.playSound(phase.onArm.sound))
         state = .armed(taskId: taskId, phase: phase, nextPhase: nextPhase, armedAt: Date())
@@ -208,20 +214,15 @@ public final class Tracker {
         let newPhase = iter.currentPhase
         let deadline = Date().addingTimeInterval(Double(newPhase.durationMin * 60))
 
-        // Determine the task that accrues during the next phase.
-        // If next phase is a break, accrue to the synthetic break task.
-        let nextTaskId: Int64 = {
-            if newPhase.accrueAs == "break" {
-                return (try? store.breakTaskId()) ?? taskId
-            } else {
-                // Returning from break: resume the work task that was active
-                // before the break. We find it by walking back through events.
-                if newPhase.accrueAs == nil {
-                    return previousWorkTaskId() ?? taskId
-                }
-                return taskId
-            }
-        }()
+        // Determine the task that accrues during the next phase via the SHARED
+        // kit helper, so this can never diverge from Store.switchFromArmed (the
+        // stateless CLI path). The helper's break branch reads breakTaskId() (it
+        // throws); preserve advance()'s historic try?-with-fallback-to-taskId so
+        // behavior is byte-identical to before this refactor.
+        let nextTaskId: Int64 = (try? store.accrualTaskId(
+            forNextPhase: newPhase,
+            carriedTaskId: taskId,
+            previousWorkTaskId: previousWorkTaskId())) ?? taskId
 
         try? store.append(Event(
             id: nil, ts: 0, type: EventType.phaseAdvance.rawValue,
