@@ -236,7 +236,7 @@ public final class Store {
         }
     }
 
-    // Returns the id of the synthetic break task, or throws if none exists.
+    // Returns the id of the synthetic break task, or -1 if none exists.
     // -1 is never a valid SQLite rowid and signals "no break row found" to callers
     // that cannot throw (e.g. tick()). If ensureBreakTask() was called in init
     // this path is unreachable in practice; the -1 sentinel guards against external
