@@ -33,6 +33,16 @@ public final class Tracker {
     public private(set) var profiles: [Profile] = []
     public private(set) var todaySeconds: [Int64: Int] = [:]  // taskId -> sec
 
+    // The wall-clock time when the current tracking phase actually began.
+    // Reset on start(), advance(), and extend() — any event that starts a new
+    // phase interval. NOT reset on switchTo() when a task switch preserves the
+    // same phase (same deadline), so elapsed time is continuous across task
+    // switches within a phase. AppState reads this directly instead of
+    // reverse-engineering it from deadline - durationMin, which breaks after
+    // extend() because extend sets deadline = now + extendMin (not
+    // now + durationMin).
+    public private(set) var phaseStartedAt: Date = Date()
+
     // Observation seam, replacing Combine. Single-subscriber AsyncStreams: the
     // app awaits them. The kit decides what should happen (a state transition,
     // a sound to play); the app performs any side effect.
@@ -64,8 +74,12 @@ public final class Tracker {
     private var iterator: CycleIterator?
     private var profile: Profile? { profiles.first(where: { $0.name == profileName }) }
     nonisolated(unsafe) private var tickTimer: Timer?
+    private var idleMonitor: IdleMonitor
 
-    public init(store: Store, profilesURL: URL) throws {
+    // idleSource defaults to FakeIdleSource (always-zero) so all existing tests
+    // compile and pass unchanged. Pass SystemIdleSource() from the app target
+    // to enable real macOS idle detection.
+    public init(store: Store, profilesURL: URL, idleSource: IdleSource = FakeIdleSource()) throws {
         // Wire the streams BEFORE any state mutation (didSet must have a live
         // continuation to yield to).
         var stateCont: AsyncStream<TrackerState>.Continuation!
@@ -77,6 +91,7 @@ public final class Tracker {
         self.effectContinuation = effectCont
 
         self.store = store
+        self.idleMonitor = IdleMonitor(source: idleSource)
         self.profiles = try ProfileLoader.loadAll(from: profilesURL)
         self.tasks = try store.tasks()
         startTickLoop()
@@ -104,9 +119,93 @@ public final class Tracker {
     // Test path: call tick(at:) with a synthetic date to exercise phase expiry
     // without waiting for wall-clock time (the Timer never fires in tests).
     func tick(at now: Date = Date()) {
+        // Phase-expiry check (always runs regardless of idle state).
         if case let .tracking(taskId, phase, deadline) = state, now >= deadline {
             armPhase(taskId: taskId, phase: phase)
         }
+
+        // Idle detection. Only meaningful when a task is active; idleMonitor
+        // is a no-op when idleSource always returns 0 (FakeIdleSource default).
+        if let prof = profile {
+            let taskId = currentTaskId()
+            let phaseId: String
+            let isBreakPhase: Bool
+            let armBoundary: Date?
+
+            switch state {
+            case .idle:
+                phaseId = ""
+                isBreakPhase = false
+                armBoundary = nil
+            case let .tracking(_, phase, deadline):
+                phaseId = phase.id
+                isBreakPhase = phase.accrueAs == "break"
+                armBoundary = deadline
+            case let .armed(_, phase, _, _):
+                phaseId = phase.id
+                isBreakPhase = phase.accrueAs == "break"
+                armBoundary = nil  // already armed; whole idle is overrun
+            }
+
+            // Detect the -1 "no break row" sentinel explicitly: if breakTaskId()
+            // throws (DB error) OR returns -1 (no break row), use -1 as breakId.
+            // Passing -1 to IdleMonitor is safe: it is not a valid tasks.id FK,
+            // so auto-resolved break-inPhase segments won't reference a real row.
+            // Using 0 (old fallback) was wrong because 0 could hypothetically be
+            // a valid rowid on a non-standard SQLite build, and is inconsistent
+            // with breakTaskId()'s own nil-row sentinel. If the break row is truly
+            // absent, idle segment creation is degraded but not FK-corrupt.
+            let rawBreakId = (try? store.breakTaskId()) ?? -1
+            let breakId: Int64 = (rawBreakId == -1) ? -1 : rawBreakId
+            let signal = idleMonitor.tick(
+                now: now,
+                profile: prof,
+                currentTaskId: taskId,
+                currentPhaseId: phaseId,
+                isBreakPhase: isBreakPhase,
+                armBoundary: armBoundary,
+                breakTaskId: breakId)
+
+            switch signal {
+            case .none:
+                break
+            case .idleDetected:
+                // Phase clock freezes; no state transition needed — the
+                // segment model tracks idle separately. A future phase can
+                // consume the idle via idle_resolve events (Phase 6).
+                break
+            case let .returned(segments):
+                // Phase 5 stopgap: immediately resolve all segments so the
+                // episode clears and the escalation loop does not fire.
+                // This discards idle classification data — identical to the
+                // break-inPhase auto-resolve path, and explicitly provisional
+                // until Phase 6 wires the resolution UI and emits idle_resolve
+                // events for non-break segments.
+                // WITHOUT this, every idle-return produces an infinite escalation
+                // storm (sound effect every tick) because fullyResolved stays
+                // false and the escalation block fires on every 1Hz tick.
+                for seg in segments {
+                    idleMonitor.resolveSegment(seg.id)
+                }
+            case let .escalate(rung):
+                // Surface the escalation effect so the app can play a sound.
+                // rung.sound is optional (rungs may be notification-only).
+                if let soundName = rung.sound {
+                    effectContinuation.yield(.playSound(soundName))
+                }
+                // Per DESIGN.md: escalation ceiling is a persistent notification,
+                // never a focus-steal modal. Emit .postNotification when the rung
+                // requests it. The app posts via UNUserNotificationCenter; same
+                // notification id replaces the previous one, so it's persistent
+                // without stacking.
+                if rung.notify {
+                    effectContinuation.yield(.postNotification(
+                        title: "TimeTrack: Idle time unclassified",
+                        body: "Return to TimeTrack to classify your idle time."))
+                }
+            }
+        }
+
         refreshToday()
     }
 
@@ -136,6 +235,7 @@ public final class Tracker {
             phaseId: phase.id, profileName: prof.name,
             extendMin: nil, comment: nil))
 
+        phaseStartedAt = Date()
         state = .tracking(taskId: taskId, phase: phase, deadline: deadline)
         activeTask = tasks.first(where: { $0.id == taskId })
     }
@@ -179,6 +279,10 @@ public final class Tracker {
             taskId: nil, prevTaskId: currentTaskId(),
             phaseId: nil, profileName: profileName,
             extendMin: nil, comment: nil))
+        // Discard any in-flight idle episode: once the session ends there is no
+        // task to attribute it to, so carrying it into the next session would
+        // emit idle_resolve events with the wrong taskId, phaseId, and interval.
+        idleMonitor.reset()
         iterator?.reset()
         state = .idle
         activeTask = nil
@@ -230,6 +334,7 @@ public final class Tracker {
             phaseId: newPhase.id, profileName: profileName,
             extendMin: nil, comment: comment))
 
+        phaseStartedAt = Date()
         state = .tracking(taskId: nextTaskId, phase: newPhase, deadline: deadline)
         activeTask = tasks.first(where: { $0.id == nextTaskId })
     }
@@ -246,6 +351,13 @@ public final class Tracker {
 
         // Return to tracking with new deadline; the re-armed phase will
         // recompute nextPhase when it next arms.
+        // Reset phaseStartedAt so elapsed starts from zero — the user just
+        // granted a fresh N-minute extension from now, not from the original
+        // phase start. Without this, AppState.updatePublished would compute
+        // phaseStart = deadline - durationMin = (now + extendMin) - durationMin,
+        // which is in the past by (durationMin - extendMin) minutes, causing an
+        // instant large elapsedSeconds jump on the timer display.
+        phaseStartedAt = Date()
         state = .tracking(taskId: taskId, phase: phase, deadline: deadline)
     }
 
@@ -275,10 +387,12 @@ public final class Tracker {
             extendMin: nil, comment: comment))
     }
 
-    public func addTask(name: String, code: String?, category: String = "project") throws {
+    @discardableResult
+    public func addTask(name: String, code: String?, category: String = "project") throws -> Task {
         let t = Task(id: nil, name: name, code: code, category: category, archived: false)
-        _ = try store.upsertTask(t)
+        let inserted = try store.upsertTask(t)
         self.tasks = try store.tasks()
+        return inserted
     }
 
     // MARK: - Helpers
@@ -291,16 +405,20 @@ public final class Tracker {
         }
     }
 
-    // Walk back through events to find the most recent non-break task.
-    // Used when advancing out of a break phase back to work.
+    // Walk back through recent events to find the most recent non-break taskId.
+    // Used by advance() when transitioning from a break phase back to work, so the
+    // new work phase accrues against the task the user was on BEFORE the break
+    // rather than silently accruing against the break task until the user manually
+    // taps a task row.
+    //
+    // Delegates to Store.mostRecentWorkTaskId() — a single DB query over the last
+    // ~50 state-changing events, cheap and bounded. Returns nil only when no prior
+    // work task exists in the window (e.g. brand-new session that started with a
+    // break), in which case the caller falls back to the carried task id.
     private func previousWorkTaskId() -> Int64? {
-        // Cheap: pull recent events, find last taskId whose task isn't break.
-        // For v1, use the activeTask we were on before the most recent
-        // phase_advance into break. Stored implicitly via state history —
-        // here we just query the DB.
-        // TODO: implement with a Store query. For now, return nil so caller
-        // falls back to current taskId. This means the first break→work
-        // transition will accrue to break task until user manually switches.
-        return nil
+        guard let breakId = try? store.breakTaskId(), breakId != -1 else {
+            return nil
+        }
+        return try? store.mostRecentWorkTaskId(excludingBreakTaskId: breakId)
     }
 }

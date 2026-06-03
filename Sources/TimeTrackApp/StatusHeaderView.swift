@@ -1,0 +1,70 @@
+#if canImport(AppKit)
+import SwiftUI
+
+// Read-only status display at the top of the popover.
+// Shows the current tracker state derived entirely from AppState @Published
+// properties — no TrackerState pattern-matching here.
+struct StatusHeaderView: View {
+    @EnvironmentObject var appState: AppState
+
+    // Format elapsed seconds as MM:SS (under an hour) or H:MM:SS.
+    private func formatElapsed(_ seconds: Int) -> String {
+        let s = seconds % 60
+        let m = (seconds / 60) % 60
+        let h = seconds / 3600
+        if h > 0 {
+            return String(format: "%d:%02d:%02d", h, m, s)
+        } else {
+            return String(format: "%02d:%02d", m, s)
+        }
+    }
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 8) {
+            Image(systemName: appState.iconSymbol)
+                .foregroundStyle(appState.iconColor)
+                .imageScale(.medium)
+
+            VStack(alignment: .leading, spacing: 2) {
+                statusLine
+                if !appState.phaseLabel.isEmpty {
+                    Text(appState.phaseLabel)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Spacer()
+
+            // Elapsed time — shown whenever tracking or armed.
+            // Gate on activeTaskName, the canonical idle signal derived by
+            // updatePublished, rather than elapsedSeconds which may briefly
+            // lag a state transition and show a stale non-zero value.
+            if !appState.activeTaskName.isEmpty {
+                Text(formatElapsed(appState.elapsedSeconds))
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+
+    // The primary status line. Styling is driven by iconColor so the single
+    // source of truth (AppState.updatePublished) controls all visual state.
+    @ViewBuilder
+    private var statusLine: some View {
+        if appState.activeTaskName.isEmpty {
+            Text("Idle")
+                .font(.headline)
+                .foregroundStyle(.secondary)
+        } else {
+            Text(appState.activeTaskName)
+                .font(.headline)
+                .foregroundStyle(appState.iconColor)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+    }
+}
+#endif

@@ -15,6 +15,10 @@ public enum EventType: String, Codable {
     case idleGap      = "idle_gap"      // marks idle-start, taskId = original
     case idleResolve  = "idle_resolve"  // classifies one segment's interval
     case reconcileBind = "reconcile_bind" // binds a loose task to a JIRA key
+    // Append-only history for the known_tasks registry. knownTaskId references
+    // the known_tasks row; jiraKey carries the new key for promote events.
+    case knownTaskPromote = "known_task_promote"  // assigns real jiraKey, clears provisional
+    case knownTaskRetire  = "known_task_retire"   // marks the entry as retired
 }
 
 public struct Task: Codable, FetchableRecord, MutablePersistableRecord, Identifiable {
@@ -199,6 +203,24 @@ public final class Store {
             }
         }
 
+        // Append-only history for the known_tasks registry.
+        // promoteKnownTask and retireKnownTask previously called k.update(db),
+        // overwriting known_tasks rows in place. From this migration onward, those
+        // operations append known_task_promote / known_task_retire events to the
+        // events table instead. knownTasks() reads the base known_tasks row and
+        // overlays the most-recent promote/retire event for each entry, so the
+        // full change history is preserved and recoverable.
+        //
+        // No schema change needed: the events table already carries knownTaskId
+        // and jiraKey columns (added in v2_known_tasks). The new event types
+        // (known_task_promote, known_task_retire) are purely application-level
+        // string constants stored in the existing `type` column.
+        //
+        // Existing DBs: rows in known_tasks may already carry in-place updates
+        // (written before this migration). Those rows are the correct baseline;
+        // new events extend from that state without any data loss.
+        migrator.registerMigration("v4_known_task_history") { _ in }
+
         try migrator.migrate(dbQueue)
     }
 
@@ -214,10 +236,45 @@ public final class Store {
         }
     }
 
+    // Returns the id of the synthetic break task, or throws if none exists.
+    // -1 is never a valid SQLite rowid and signals "no break row found" to callers
+    // that cannot throw (e.g. tick()). If ensureBreakTask() was called in init
+    // this path is unreachable in practice; the -1 sentinel guards against external
+    // DB mutation. Callers MUST treat -1 as "break row missing" and not pass it as
+    // a taskId FK, since -1 has no matching row in the tasks table.
     public func breakTaskId() throws -> Int64 {
         try dbQueue.read { db in
             try Task.filter(Column("category") == "break")
                 .fetchOne(db)?.id ?? -1
+        }
+    }
+
+    // Most recent non-break taskId from state-changing events, used by
+    // previousWorkTaskId() when advancing from a break phase back to work.
+    // Searches the last `limit` events for efficiency — the break→work transition
+    // is always preceded by a recent start/switch/phase_advance to a work task.
+    // Returns nil if no non-break task is found in the window (first session ever
+    // or all recent events were break-task accruals).
+    public func mostRecentWorkTaskId(excludingBreakTaskId breakId: Int64,
+                                     limit: Int = 50) throws -> Int64? {
+        try dbQueue.read { db in
+            let workTypes = [
+                EventType.start.rawValue,
+                EventType.switch.rawValue,
+                EventType.phaseAdvance.rawValue,
+            ]
+            // Walk recent state-changing events newest-first; pick the first
+            // whose taskId isn't the break task. Phase-advance into a break phase
+            // is skipped because its taskId IS the break task; phase-advance into
+            // a work phase has the work task's id.
+            let events = try Event
+                .filter(workTypes.contains(Column("type")))
+                .filter(Column("taskId") != nil)
+                .filter(Column("taskId") != breakId)
+                .order(Column("ts").desc, Column("id").desc)
+                .limit(limit)
+                .fetchAll(db)
+            return events.first?.taskId
         }
     }
 
@@ -299,14 +356,13 @@ public final class Store {
     //
     // SINGLE source of truth for "which task accrues during the next phase",
     // shared by Tracker.advance() (in-process) and switchFromArmed (stateless
-    // CLI) so the two can NEVER diverge — especially once previousWorkTaskId()
-    // is implemented. Mirrors Tracker.advance()'s exact current behavior:
+    // CLI) so the two can NEVER diverge. Mirrors Tracker.advance()'s exact behavior:
     //   - break phase (accrueAs == "break")  -> the synthetic break task
     //   - returning from break (accrueAs == nil) -> previousWorkTaskId ?? carried
     //   - otherwise (a named work phase)      -> the carried task
     // `carriedTaskId` is the task active at the armed boundary (advance: the armed
     // taskId; switchFromArmed: armedTaskId). `previousWorkTaskId` is the resumed
-    // work task when leaving a break; nil today (stub) so the fallback is carried.
+    // work task when leaving a break; both callers now implement the real DB lookup.
     public func accrualTaskId(forNextPhase nextPhase: Phase,
                               carriedTaskId: Int64,
                               previousWorkTaskId: Int64?) throws -> Int64 {
@@ -375,12 +431,20 @@ public final class Store {
                 armedPhaseId: armedPhaseId, profileName: profile.name)
         }
 
+        // Look up the prior work task exactly as Tracker.previousWorkTaskId() does,
+        // so the CLI path (switchFromArmed) and the in-process path (Tracker.advance)
+        // always produce identical phase_advance events. armedTaskId is the break
+        // task's id when advancing out of a break phase, so we exclude it to find
+        // the most-recent real work task before that break.
+        let prevWorkId: Int64? = {
+            guard let breakId = try? self.breakTaskId(), breakId != -1 else { return nil }
+            return try? self.mostRecentWorkTaskId(excludingBreakTaskId: breakId)
+        }()
+
         let accrualTaskId = try accrualTaskId(
             forNextPhase: nextPhase,
             carriedTaskId: armedTaskId,
-            // Mirrors advance(): previousWorkTaskId() is a nil-returning stub
-            // today, so this is nil here too — keep them identical.
-            previousWorkTaskId: nil)
+            previousWorkTaskId: prevWorkId)
 
         // 1) Implicit ack: phase_advance onto the next phase's accrual task.
         try append(Event(
@@ -522,6 +586,8 @@ public final class Store {
              .idleGap,
              .idleResolve,
              .reconcileBind,
+             .knownTaskPromote,
+             .knownTaskRetire,
              .none:               return current
         }
     }
@@ -533,9 +599,48 @@ public final class Store {
 
     public func knownTasks(activeOnly: Bool = true) throws -> [KnownTask] {
         try dbQueue.read { db in
-            var req = KnownTask.all()
-            if activeOnly { req = req.filter(Column("retired") == false) }
-            return try req.order(Column("createdTs").desc).fetchAll(db)
+            // Fetch all base rows; history events will overlay them below.
+            var rows = try KnownTask.order(Column("createdTs").desc).fetchAll(db)
+
+            // Collect the most-recent promote/retire event per known_tasks id.
+            // Last-write-wins: events are ordered ascending by ts/id so later
+            // entries overwrite earlier ones in the dictionary.
+            let historyTypes = [
+                EventType.knownTaskPromote.rawValue,
+                EventType.knownTaskRetire.rawValue,
+            ]
+            let historyEvents = try Event
+                .filter(historyTypes.contains(Column("type")))
+                .filter(Column("knownTaskId") != nil)
+                .order(Column("ts").asc, Column("id").asc)
+                .fetchAll(db)
+
+            // Build a last-write-wins map: knownTaskId -> most recent event.
+            var latestByKnownTaskId: [Int64: Event] = [:]
+            for e in historyEvents {
+                if let ktid = e.knownTaskId { latestByKnownTaskId[ktid] = e }
+            }
+
+            // Overlay history onto each base row.
+            rows = rows.map { base in
+                guard let kid = base.id, let latest = latestByKnownTaskId[kid] else {
+                    return base
+                }
+                var updated = base
+                switch EventType(rawValue: latest.type) {
+                case .knownTaskPromote:
+                    updated.jiraKey = latest.jiraKey ?? base.jiraKey
+                    updated.provisional = false
+                case .knownTaskRetire:
+                    updated.retired = true
+                default:
+                    break
+                }
+                return updated
+            }
+
+            if activeOnly { rows = rows.filter { !$0.retired } }
+            return rows
         }
     }
 
@@ -552,32 +657,45 @@ public final class Store {
         }
     }
 
-    // Promote a provisional entry by attaching its real JIRA key. Because binds
-    // reference the registry id (not the key), every prior binding to this entry
-    // now resolves to the real key automatically — no re-binding.
+    // Promote a provisional entry by attaching its real JIRA key. Append-only:
+    // writes a known_task_promote event; the known_tasks row is never mutated.
+    // Because binds reference the registry id (not the key), every prior binding
+    // to this entry now resolves to the real key automatically — no re-binding.
+    // The promote event's jiraKey field carries the new key; knownTaskId links
+    // it to the registry entry. knownTasks() overlays this event at read time.
     @discardableResult
     public func promoteKnownTask(id: Int64, jiraKey: String) throws -> Bool {
-        try dbQueue.write { db in
-            if var k = try KnownTask.fetchOne(db, key: id) {
-                k.jiraKey = jiraKey
-                k.provisional = false
-                try k.update(db)
-                return true
-            }
-            return false
+        let exists = try dbQueue.read { db in
+            try KnownTask.fetchOne(db, key: id) != nil
         }
+        guard exists else { return false }
+        try append(Event(
+            id: nil, ts: 0, type: EventType.knownTaskPromote.rawValue,
+            taskId: nil, prevTaskId: nil,
+            phaseId: nil, profileName: nil,
+            extendMin: nil, comment: nil,
+            rangeStart: nil, rangeEnd: nil,
+            knownTaskId: id, jiraKey: jiraKey))
+        return true
     }
 
+    // Retire a known_tasks entry by appending a known_task_retire event.
+    // Append-only: the known_tasks row is never mutated. knownTasks() overlays
+    // this event so the entry is excluded from active lists at read time.
     @discardableResult
     public func retireKnownTask(id: Int64) throws -> Bool {
-        try dbQueue.write { db in
-            if var k = try KnownTask.fetchOne(db, key: id) {
-                k.retired = true
-                try k.update(db)
-                return true
-            }
-            return false
+        let exists = try dbQueue.read { db in
+            try KnownTask.fetchOne(db, key: id) != nil
         }
+        guard exists else { return false }
+        try append(Event(
+            id: nil, ts: 0, type: EventType.knownTaskRetire.rawValue,
+            taskId: nil, prevTaskId: nil,
+            phaseId: nil, profileName: nil,
+            extendMin: nil, comment: nil,
+            rangeStart: nil, rangeEnd: nil,
+            knownTaskId: id, jiraKey: nil))
+        return true
     }
 
     // MARK: - Reconciliation

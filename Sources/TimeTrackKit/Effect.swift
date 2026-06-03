@@ -4,10 +4,15 @@ import Foundation
 // and Linux-buildable by emitting these instead of calling AppKit/UserNotifications
 // directly; the app subscribes to Tracker.effectStream and executes them.
 //
-// Phase 1 ships .playSound only — the single existing side effect (phase-arm chime).
-// .postNotification and .setIcon enter the enum when Phase 5 needs them; adding a
-// case is source-compatible with existing consumers as long as switches are
-// non-exhaustive at the boundary.
+// IMPORTANT: AppState.subscribeToEffectStream() switches exhaustively over this enum.
+// Adding a case here will cause a compile error there, intentionally forcing the
+// new effect to be wired in the app layer before the build passes.
 public enum Effect: Equatable {
     case playSound(String)   // NSSound name; app performs the play
+
+    // Per DESIGN.md: escalation ceiling is a persistent notification, never a modal.
+    // Emitted when an EscalationRung has notify: true. The app layer posts this
+    // via UNUserNotificationCenter; re-posting the same notification identifier
+    // replaces the existing one (persistent, not stacking).
+    case postNotification(title: String, body: String)
 }
