@@ -615,26 +615,30 @@ public final class Store {
                 .order(Column("ts").asc, Column("id").asc)
                 .fetchAll(db)
 
-            // Build a last-write-wins map: knownTaskId -> most recent event.
-            var latestByKnownTaskId: [Int64: Event] = [:]
+            // Track promote and retire independently so both overlays apply
+            // regardless of order. A single last-write-wins map would drop the
+            // promote data when retire is the most-recent event.
+            var latestPromote: [Int64: Event] = [:]
+            var latestRetire: [Int64: Event] = [:]
             for e in historyEvents {
-                if let ktid = e.knownTaskId { latestByKnownTaskId[ktid] = e }
+                guard let ktid = e.knownTaskId else { continue }
+                switch EventType(rawValue: e.type) {
+                case .knownTaskPromote: latestPromote[ktid] = e
+                case .knownTaskRetire:  latestRetire[ktid] = e
+                default: break
+                }
             }
 
             // Overlay history onto each base row.
             rows = rows.map { base in
-                guard let kid = base.id, let latest = latestByKnownTaskId[kid] else {
-                    return base
-                }
+                guard let kid = base.id else { return base }
                 var updated = base
-                switch EventType(rawValue: latest.type) {
-                case .knownTaskPromote:
-                    updated.jiraKey = latest.jiraKey ?? base.jiraKey
+                if let promote = latestPromote[kid] {
+                    updated.jiraKey = promote.jiraKey ?? base.jiraKey
                     updated.provisional = false
-                case .knownTaskRetire:
+                }
+                if latestRetire[kid] != nil {
                     updated.retired = true
-                default:
-                    break
                 }
                 return updated
             }
