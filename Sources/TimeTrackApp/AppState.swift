@@ -1,0 +1,350 @@
+#if canImport(AppKit)
+import SwiftUI
+import TimeTrackKit
+import UserNotifications
+
+// Disambiguate Swift.Task (concurrency) from TimeTrackKit.Task (the data model).
+// Within this file, `AsyncTask` refers to Swift's concurrency primitive.
+private typealias AsyncTask<S, F: Error> = _Concurrency.Task<S, F>
+
+enum AppStateError: Error {
+    case taskNotFoundAfterInsert(name: String)
+}
+
+// Single @MainActor ObservableObject that mediates between TimeTrackKit and
+// all views. Views read @Published properties and call public methods; they
+// contain zero conditional logic about tracker state. All TrackerState
+// pattern-matching is funneled through updatePublished(from:) — that is the
+// ONLY place in the app layer where TrackerState cases are inspected.
+@MainActor
+final class AppState: ObservableObject {
+
+    // MARK: - @Published properties (read by views)
+
+    // Menu-bar icon
+    @Published var iconSymbol: String = "timer"
+    @Published var iconColor: Color = .secondary
+
+    // Status bar (top of popover)
+    @Published var activeTaskName: String = ""
+    @Published var phaseLabel: String = ""
+    @Published var elapsedSeconds: Int = 0
+    @Published var trackerState: TrackerState = .idle
+
+    // Task list
+    @Published var tasks: [Task] = []
+    @Published var activeTaskId: Int64? = nil
+
+    // Armed boundary actions — non-empty only when state == .armed
+    @Published var armedActions: [ArmAction] = []
+
+    // Profiles
+    @Published var profiles: [Profile] = []
+    @Published var selectedProfileName: String = "default"
+
+    // Today totals (taskId -> seconds) for row annotations
+    @Published var todaySeconds: [Int64: Int] = [:]
+
+    // isActive is derived once in updatePublished and read by the elapsed timer.
+    // This lets startElapsedTimer avoid inspecting TrackerState directly, keeping
+    // updatePublished the ONLY TrackerState inspection site in the app layer.
+    private var isActive: Bool = false
+
+    // MARK: - Internals
+
+    private let store: Store
+    private let tracker: Tracker
+
+    // Background async tasks holding the stream subscriptions.
+    // nonisolated(unsafe): deinit is nonisolated (SE-0371/Swift 5.10); we need
+    // to cancel all three tasks from deinit without actor isolation.
+    nonisolated(unsafe) private var stateTask: AsyncTask<Void, Never>?
+    nonisolated(unsafe) private var effectTask: AsyncTask<Void, Never>?
+    nonisolated(unsafe) private var elapsedTask: AsyncTask<Void, Never>?
+
+    // Tracks the Date when the current phase/task started so elapsedSeconds
+    // can be computed without querying the DB every second.
+    private var phaseStart: Date = Date()
+
+    // MARK: - Init
+
+    init(store: Store, profilesURL: URL) throws {
+        self.store = store
+        self.tracker = try Tracker(store: store, profilesURL: profilesURL, idleSource: SystemIdleSource())
+        self.profiles = tracker.profiles
+        self.tasks = try store.userTasks()
+        updatePublished(from: tracker.state)
+        subscribeToStateStream()
+        subscribeToEffectStream()
+        startElapsedTimer()
+        requestNotificationAuthorization()
+    }
+
+    // Request UNUserNotificationCenter authorization for escalation ceiling
+    // notifications (DESIGN.md: persistent notification, never a modal). Called
+    // once at init; UNUserNotificationCenter de-duplicates subsequent requests.
+    // Only prompts when authorization is .notDetermined — denied users are not
+    // re-prompted. Must be nonisolated so it can fire a detached Task without
+    // capturing the @MainActor-isolated self.
+    private func requestNotificationAuthorization() {
+        // UNUserNotificationCenter requires a bundle ID — unavailable in unbundled
+        // binaries produced by `swift build`. Skip silently; Xcode builds have a bundle.
+        guard Bundle.main.bundleIdentifier != nil else { return }
+        // Use _Concurrency.Task to avoid conflict with TimeTrackKit.Task.
+        _Concurrency.Task.detached {
+            let center = UNUserNotificationCenter.current()
+            let settings = await center.notificationSettings()
+            guard settings.authorizationStatus == .notDetermined else { return }
+            try? await center.requestAuthorization(options: [.alert])
+        }
+    }
+
+    // MARK: - deinit
+
+    // Cancel all three background tasks so stream loops exit promptly.
+    // nonisolated: deinit is always nonisolated (SE-0371). Task.cancel() is
+    // itself nonisolated, so this is safe. The task handles are
+    // nonisolated(unsafe) above — deinit only runs after all strong refs are
+    // gone, so there is no concurrent actor access.
+    nonisolated func cleanup() {
+        stateTask?.cancel()
+        effectTask?.cancel()
+        elapsedTask?.cancel()
+    }
+
+    deinit {
+        cleanup()
+    }
+
+    // MARK: - Stream subscriptions
+
+    // RETAIN-CYCLE NOTE: do NOT use `guard let self` BEFORE the for-await loop.
+    // A guard-let before the loop promotes the weak capture to a strong local
+    // reference that persists for the entire suspension (the whole loop body),
+    // creating the very cycle: AppState → stateTask/effectTask (nonisolated Task
+    // handle) → Task closure body → strong `self` → AppState. Instead, we capture
+    // `tracker` directly (not through self) and re-check `self` weakly on each
+    // iteration inside MainActor.run, so when the last external strong reference
+    // drops the next iteration finds self == nil and the loop exits naturally,
+    // allowing deinit (and cleanup()) to fire without deadlocking.
+    private func subscribeToStateStream() {
+        let tracker = self.tracker   // capture tracker directly, not through self
+        stateTask = AsyncTask { [weak self] in
+            for await state in await tracker.stateStream {
+                guard let self else { return }  // per-iteration weak check
+                await MainActor.run { [weak self] in
+                    self?.updatePublished(from: state)
+                }
+            }
+        }
+    }
+
+    // Exhaustive switch — no default. Adding a case to Effect (e.g. .postNotification)
+    // will produce a compile error here intentionally, forcing explicit wiring.
+    private func subscribeToEffectStream() {
+        let tracker = self.tracker   // capture tracker directly, not through self
+        effectTask = AsyncTask { [weak self] in
+            for await effect in await tracker.effectStream {
+                guard let self else { return }  // per-iteration weak check
+                switch effect {
+                case .playSound(let name):
+                    Sounds.play(name)
+                case .postNotification(let title, let body):
+                    await self.postNotification(title: title, body: body)
+                }
+            }
+        }
+    }
+
+    // Posts a system notification. Called from the effect stream when an
+    // escalation rung has notify: true. Per DESIGN.md, the ceiling is a
+    // persistent notification, never a focus-steal modal.
+    @MainActor
+    private func postNotification(title: String, body: String) async {
+        guard Bundle.main.bundleIdentifier != nil else { return }
+        let center = UNUserNotificationCenter.current()
+        let settings = await center.notificationSettings()
+        guard settings.authorizationStatus == .authorized else { return }
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = nil   // escalation rungs already play sound via .playSound
+        let req = UNNotificationRequest(
+            identifier: "timetrack.idle.escalation",
+            content: content,
+            trigger: nil)  // deliver immediately; replacing same id updates the existing one
+        try? await center.add(req)
+    }
+
+    // 1 Hz loop that increments elapsedSeconds when tracking or armed.
+    // Reads `isActive` (set by updatePublished) instead of pattern-matching
+    // TrackerState directly — this keeps updatePublished the single chokepoint
+    // for all TrackerState inspection in the app layer.
+    private func startElapsedTimer() {
+        elapsedTask = AsyncTask { [weak self] in
+            while true {
+                // sleep(nanoseconds:) throws CancellationError when cancelled.
+                do { try await _Concurrency.Task.sleep(nanoseconds: 1_000_000_000) }
+                catch { return }
+                guard let self else { return }
+                await MainActor.run {
+                    if self.isActive {
+                        self.elapsedSeconds = Int(Date().timeIntervalSince(self.phaseStart))
+                    } else {
+                        self.elapsedSeconds = 0
+                    }
+                    // Keep per-task time annotations live at 1 Hz.
+                    // tracker.todaySeconds is already refreshed every second by the
+                    // tick loop; copying it here avoids a separate DB query and ensures
+                    // task rows show current totals throughout a phase, not just at
+                    // state transitions.
+                    self.todaySeconds = self.tracker.todaySeconds
+                }
+            }
+        }
+    }
+
+    // MARK: - updatePublished — SINGLE chokepoint for TrackerState
+
+    // This is the ONLY place in the entire app that pattern-matches TrackerState.
+    // All @Published properties are derived here from the canonical state value.
+    // isActive is also set here so startElapsedTimer never needs to inspect state.
+    private func updatePublished(from state: TrackerState) {
+        trackerState = state
+        todaySeconds = tracker.todaySeconds
+
+        switch state {
+        case .idle:
+            isActive = false
+            iconSymbol = "timer"
+            iconColor = .secondary
+            activeTaskName = ""
+            phaseLabel = ""
+            elapsedSeconds = 0
+            activeTaskId = nil
+            armedActions = []
+            phaseStart = Date()
+
+        case let .tracking(taskId, phase, _):
+            isActive = true
+            activeTaskId = taskId
+            activeTaskName = tracker.activeTask?.name ?? ""
+            phaseLabel = phase.id.replacingOccurrences(of: "_", with: " ").capitalized
+            armedActions = []
+
+            // Icon: break phases use the cup symbol; work phases use timer.
+            if phase.accrueAs == "break" {
+                iconSymbol = "cup.and.saucer"
+                iconColor = .blue
+            } else {
+                iconSymbol = "timer"
+                iconColor = .primary
+            }
+
+            // Use tracker.phaseStartedAt — the wall-clock time when this phase
+            // interval actually began. This is set by Tracker on start(),
+            // advance(), and extend(). We do NOT derive it from
+            // deadline - durationMin because extend() sets deadline = now +
+            // extendMin (not now + durationMin), so the subtraction yields a
+            // phaseStart in the wrong past, causing elapsedSeconds to jump by
+            // (durationMin - extendMin) * 60 the instant the user taps '+15 min'.
+            phaseStart = tracker.phaseStartedAt
+            elapsedSeconds = Int(Date().timeIntervalSince(phaseStart))
+
+        case let .armed(taskId, phase, _, armedAt):
+            isActive = true
+            activeTaskId = taskId
+            activeTaskName = tracker.activeTask?.name ?? ""
+            phaseLabel = phase.id.replacingOccurrences(of: "_", with: " ").capitalized + " (armed)"
+            armedActions = phase.onArm.actions
+
+            let (sym, col) = iconState(for: phase)
+            iconSymbol = sym
+            iconColor = col
+
+            phaseStart = armedAt
+            elapsedSeconds = Int(Date().timeIntervalSince(armedAt))
+        }
+
+        // Refresh task list and profiles from tracker (they change rarely).
+        tasks = tracker.tasks.filter { $0.category != "break" }
+        profiles = tracker.profiles
+        selectedProfileName = tracker.profileName
+    }
+
+    // Maps ArmConfig.color strings (from profiles.yaml) to SF Symbol names and
+    // SwiftUI Colors. This is the ONLY place profile color strings are interpreted
+    // as visual state — it lives at the app boundary where SwiftUI is permitted.
+    private func iconState(for phase: Phase) -> (String, Color) {
+        switch phase.onArm.color {
+        case "green_pulse":
+            return ("checkmark.circle", .green)
+        case "amber":
+            return ("exclamationmark.triangle", .orange)
+        case "amber_pulse":
+            return ("exclamationmark.triangle.fill", .orange)
+        case "red":
+            return ("exclamationmark.triangle.fill", .red)
+        case "red_pulse":
+            return ("exclamationmark.triangle.fill", .red)
+        default:
+            return ("timer", .primary)
+        }
+    }
+
+    // MARK: - Public API (called by views)
+
+    // select(taskId:) is the single entry point for user-initiated task selection.
+    // Delegates unconditionally to tracker.switchTo(), which handles all three
+    // TrackerState cases correctly:
+    //   .idle    → start (fresh cycle)
+    //   .tracking → switch (preserve current phase and deadline)
+    //   .armed   → implicit advance then switch (no cycle reset)
+    // Previously this called tracker.start() directly, which always reset the
+    // phase cycle (stop() + iterator.reset()) on every task switch — violating
+    // the DESIGN.md invariant "TRACKING → switch → TRACKING(task', same phase)".
+    func select(taskId: Int64) {
+        tracker.switchTo(taskId: taskId)
+    }
+
+    // Creates a new task in the DB, refreshes the task list, then starts it.
+    // Throws AppStateError.taskNotFoundAfterInsert if the task cannot be found
+    // immediately after upsert — this should never happen (upsert is synchronous),
+    // but the explicit throw surfaces a real DB error path to the caller rather
+    // than silently leaving the tracker in its previous state.
+    func addAndStart(name: String) throws {
+        // addTask returns the inserted Task with its id populated via didInsert.
+        // Using the returned id avoids a name-search that would find the WRONG row
+        // if two unarchived tasks share the same name (no UNIQUE constraint on name).
+        let inserted = try tracker.addTask(name: name, code: nil)
+        guard let id = inserted.id else {
+            throw AppStateError.taskNotFoundAfterInsert(name: name)
+        }
+        // addTask refreshes tracker.tasks; sync our published list.
+        tasks = tracker.tasks.filter { $0.category != "break" }
+        // Use switchTo so a newly-started task doesn't reset the phase cycle
+        // when the tracker is already running.
+        tracker.switchTo(taskId: id)
+    }
+
+    func advance() {
+        tracker.advance()
+    }
+
+    func extend(minutes: Int) {
+        tracker.extend(minutes: minutes)
+    }
+
+    func stop() {
+        tracker.stop()
+    }
+
+    func setProfile(_ name: String) {
+        tracker.setProfile(name)
+    }
+
+    func logInterruption(comment: String) {
+        tracker.logInterruption(comment: comment)
+    }
+}
+#endif

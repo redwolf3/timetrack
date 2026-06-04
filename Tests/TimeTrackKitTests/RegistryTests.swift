@@ -95,6 +95,43 @@ final class RegistryTests: XCTestCase {
         XCTAssertTrue(all.contains { $0.id == retiredId }, "retired task should appear in full list")
     }
 
+    // Regression: a single last-write-wins map would record the retire event as
+    // latest and drop the promote overlay entirely, leaving the task provisional
+    // with no jiraKey even though it was promoted before being retired.
+    func testPromoteThenRetirePreservesJiraKey() throws {
+        let dir = try makeTmpDir()
+        let store = try Store(url: dir.appendingPathComponent("test.db"))
+
+        let task = try store.addKnownTask(jiraKey: nil, description: "Will be promoted then retired")
+        let id = try XCTUnwrap(task.id)
+
+        try store.promoteKnownTask(id: id, jiraKey: "PROJ-7")
+        try store.retireKnownTask(id: id)
+
+        let all = try store.knownTasks(activeOnly: false)
+        let result = try XCTUnwrap(all.first { $0.id == id })
+        XCTAssertTrue(result.retired, "task should be retired")
+        XCTAssertFalse(result.provisional, "task should not be provisional after promotion")
+        XCTAssertEqual(result.jiraKey, "PROJ-7", "jiraKey from promote must survive retire overlay")
+    }
+
+    func testRetireThenPromoteAppliesBothOverlays() throws {
+        let dir = try makeTmpDir()
+        let store = try Store(url: dir.appendingPathComponent("test.db"))
+
+        let task = try store.addKnownTask(jiraKey: nil, description: "Retired then promoted")
+        let id = try XCTUnwrap(task.id)
+
+        try store.retireKnownTask(id: id)
+        try store.promoteKnownTask(id: id, jiraKey: "PROJ-8")
+
+        let all = try store.knownTasks(activeOnly: false)
+        let result = try XCTUnwrap(all.first { $0.id == id })
+        XCTAssertTrue(result.retired, "retire event must still be applied")
+        XCTAssertFalse(result.provisional, "promote event must still be applied")
+        XCTAssertEqual(result.jiraKey, "PROJ-8", "jiraKey from promote must be applied")
+    }
+
     func testKnownTasksDefaultActiveOnly() throws {
         let dir = try makeTmpDir()
         let store = try Store(url: dir.appendingPathComponent("test.db"))

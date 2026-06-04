@@ -133,6 +133,15 @@ public final class IdleMonitor {
         return .none
     }
 
+    // Discard any in-flight episode and reset idle state. Call this from
+    // Tracker.stop() so a stale episode opened during one session cannot bleed into
+    // the next. Once the session ends there is no task to attribute the idle time to,
+    // so the episode is definitionally unresolvable and must be discarded.
+    public func reset() {
+        episode = nil
+        wasIdle = false
+    }
+
     public func resolveSegment(_ id: UUID) {
         guard let ep = episode else { return }
         if let idx = ep.segments.firstIndex(where: { $0.id == id }) {

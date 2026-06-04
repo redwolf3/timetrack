@@ -107,6 +107,39 @@ never knows JIRA exists.
 - Output contract: `jira_cache.json` = `[{ "key": "...", "summary": "...",
   "status": "..." }]`. The current sprint overhead JIRA is just another row.
 
+## Report-layer time normalisation (post-MVP, design partially locked)
+
+Raw event data is never modified. Normalisation is applied only at report
+generation time, in three ordered passes:
+
+1. **Per-interval drop/floor.** For each contiguous interval on a task:
+   - < 30 s → **dropped** entirely (does not count toward aggregate).
+     The switch is still visible in the raw diagnostic report.
+   - ≥ 30 s → **rounded up** to 1 minute minimum.
+   Rationale: sub-30-second switches are accidental taps; ≥30 s carries real
+   context-switching cost worth crediting.
+
+2. **Per-task cumulative rounding.** After summing all surviving intervals for a
+   task, round **up** to the nearest 15 minutes.
+   Example: 25 m → 30 m, 31 m → 45 m.
+
+3. **Sub-15-minute aggregate prompt (implementation detail TBD).** At the
+   end-of-day / next-day reporting boundary, any task whose post-rounding total
+   is still < 15 minutes (i.e. it only accumulated small surviving chunks) is
+   surfaced to the user with three options:
+   - **Record as 15 min** — credit the full minimum billable unit.
+   - **Drop** — discard all time for this task from the day's report.
+   - **Roll into aggregate** — merge into a configurable catch-all bucket
+     (e.g. "miscellaneous / overhead").
+   The prompt fires once per affected task per day. Exact UI and trigger
+   mechanism to be decided at implementation time.
+
+All thresholds (30 s drop floor, 1 min credit floor, 15 min rounding quantum)
+are report-time parameters — configurable per invocation, not baked into events.
+`reconciledReport` will gain `dropBelowSec: Int`, `minIntervalMin: Int`, and
+`roundToMin: Int` parameters. The raw `report(day:)` diagnostic mode applies no
+normalisation and shows all intervals including sub-30-second ones.
+
 ## Deferred backlog (post-MVP)
 
 - **Interval-level bind / split / re-assign.** v1 is task-level: one loose task →
@@ -126,3 +159,13 @@ never knows JIRA exists.
   standalone; DevMux writes events if it wants to.
 - **Screenshot recall** — explicitly rejected for v1 (data-exfiltration risk on a
   work machine). Window-title history via idle/event log covers recall instead.
+- **Quit / Restart menu items.** Standard macOS menu-bar affordances; Phase 6.
+- **History / recording review pop-up.** In-app view of today's and recent
+  intervals; Phase 6. Raw data is always accessible via `timetrack report` and
+  directly via the SQLite DB at `~/Library/Application Support/timetrack/events.db`.
+- **JIRA sync UI + daily reminders.** Phase 7 delivers the `jira-sync` CLI tool
+  that writes `jira_cache.json`. Phase 8 (planned) adds: in-app Known Task
+  promotion from the JIRA cache, a start-of-day sync prompt, an end-of-day
+  summary with time-recording confirmation, and a once-per-day reminder
+  notification to log time against JIRAs. The app never writes to JIRA directly —
+  it surfaces the data and the user confirms.
