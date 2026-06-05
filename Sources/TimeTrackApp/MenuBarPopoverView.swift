@@ -55,6 +55,14 @@ struct MenuBarPopoverView: View {
                 Divider()
                 stopRow
             }
+
+            // ── Profile picker ────────────────────────────────────────────────
+            Divider()
+            profilePickerRow
+
+            // ── Quit ──────────────────────────────────────────────────────────
+            Divider()
+            quitRow
         }
         .frame(width: 280)
         .background(.regularMaterial)
@@ -167,6 +175,41 @@ struct MenuBarPopoverView: View {
             .buttonStyle(.bordered)
             .controlSize(.small)
             .foregroundStyle(.red)
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+
+    // MARK: - Profile picker
+
+    private var profilePickerRow: some View {
+        HStack {
+            Picker("Profile", selection: $appState.selectedProfileName) {
+                ForEach(appState.profiles, id: \.name) { profile in
+                    Text(profile.name).tag(profile.name)
+                }
+            }
+            .pickerStyle(.menu)
+            .onChange(of: appState.selectedProfileName) { _, name in
+                appState.setProfile(name)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+
+    // MARK: - Quit row
+
+    private var quitRow: some View {
+        HStack {
+            Spacer()
+            Button("Quit TimeTrack") {
+                NSApplication.shared.terminate(nil)
+            }
+            .buttonStyle(.plain)
+            .font(.caption)
+            .foregroundStyle(.secondary)
             Spacer()
         }
         .padding(.horizontal, 12)
