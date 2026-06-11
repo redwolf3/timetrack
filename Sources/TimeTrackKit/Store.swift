@@ -249,35 +249,6 @@ public final class Store {
         }
     }
 
-    // Most recent non-break taskId from state-changing events, used by
-    // previousWorkTaskId() when advancing from a break phase back to work.
-    // Searches the last `limit` events for efficiency — the break→work transition
-    // is always preceded by a recent start/switch/phase_advance to a work task.
-    // Returns nil if no non-break task is found in the window (first session ever
-    // or all recent events were break-task accruals).
-    public func mostRecentWorkTaskId(excludingBreakTaskId breakId: Int64,
-                                     limit: Int = 50) throws -> Int64? {
-        try dbQueue.read { db in
-            let workTypes = [
-                EventType.start.rawValue,
-                EventType.switch.rawValue,
-                EventType.phaseAdvance.rawValue,
-            ]
-            // Walk recent state-changing events newest-first; pick the first
-            // whose taskId isn't the break task. Phase-advance into a break phase
-            // is skipped because its taskId IS the break task; phase-advance into
-            // a work phase has the work task's id.
-            let events = try Event
-                .filter(workTypes.contains(Column("type")))
-                .filter(Column("taskId") != nil)
-                .filter(Column("taskId") != breakId)
-                .order(Column("ts").desc, Column("id").desc)
-                .limit(limit)
-                .fetchAll(db)
-            return events.first?.taskId
-        }
-    }
-
     // MARK: - Tasks
 
     public func tasks(includeArchived: Bool = false) throws -> [Task] {
@@ -357,12 +328,20 @@ public final class Store {
     // SINGLE source of truth for "which task accrues during the next phase",
     // shared by Tracker.advance() (in-process) and switchFromArmed (stateless
     // CLI) so the two can NEVER diverge. Mirrors Tracker.advance()'s exact behavior:
-    //   - break phase (accrueAs == "break")  -> the synthetic break task
-    //   - returning from break (accrueAs == nil) -> previousWorkTaskId ?? carried
-    //   - otherwise (a named work phase)      -> the carried task
+    // (One deliberate asymmetry: on a DB read error advance() degrades via try?
+    // to the carried task and keeps tracking, while switchFromArmed propagates
+    // the error and appends nothing — the CLI surfaces failures instead.)
+    //   - break phase (accrueAs == "break")     -> the synthetic break task
+    //   - work phase (accrueAs == nil)          -> previousWorkTaskId ?? carried
+    //     (previousWorkTaskId is non-nil only when leaving a break, so ordinary
+    //     work→work advances resolve to the carried task)
+    //   - otherwise (unrecognized accrueAs value; future extension) -> carried
     // `carriedTaskId` is the task active at the armed boundary (advance: the armed
     // taskId; switchFromArmed: armedTaskId). `previousWorkTaskId` is the resumed
-    // work task when leaving a break; both callers now implement the real DB lookup.
+    // work task when leaving a break — both callers compute it via
+    // previousWorkTaskId(leavingBreak:asOf:staleFactor:) below; nil when there is
+    // nothing sane to resume (no prior work task, stopped session, or stale
+    // break), so the fallback is carried.
     public func accrualTaskId(forNextPhase nextPhase: Phase,
                               carriedTaskId: Int64,
                               previousWorkTaskId: Int64?) throws -> Int64 {
@@ -374,6 +353,74 @@ public final class Store {
             return previousWorkTaskId ?? carriedTaskId
         }
         return carriedTaskId
+    }
+
+    // Multiplier on a break phase's nominal durationMin beyond which auto-resume
+    // is suppressed: if (now − breakRunStart) > factor × durationMin, the break
+    // ran so far past its intended length that silently resuming the old task is
+    // more likely wrong than right — return nil and let the user pick. Relative
+    // (not an absolute-minutes knob) so it self-scales per profile; promotable to
+    // a Profile field if per-profile tuning is ever wanted.
+    static let breakResumeStaleFactor: Double = 2.0
+
+    // The work task to resume when advancing OUT of `breakPhase` back into work,
+    // or nil when there is nothing sane to resume: no prior work task exists, the
+    // session was stopped, or the break ran past staleFactor × durationMin.
+    // SINGLE source of truth shared by Tracker.advance() (in-process) and
+    // switchFromArmed (stateless CLI) — same never-diverge contract as
+    // accrualTaskId above, which consumes this value.
+    //
+    // Pure read of the append-only log. The walk reuses nextActiveTask() so the
+    // active-task timeline can never diverge from report(): idle_gap/idle_resolve
+    // are no-ops here too (idle reattribution is a report-time overlay, not a
+    // state transition), and stop clears the timeline.
+    //
+    // `now` is injected (asOf) so staleness is deterministically testable.
+    func previousWorkTaskId(leavingBreak breakPhase: Phase,
+                            asOf now: Date,
+                            staleFactor: Double = Store.breakResumeStaleFactor) throws -> Int64? {
+        let breakId = try breakTaskId()
+        let events = try readAllEventsInternal()
+
+        var active: Int64? = nil           // active-task timeline, as report() sees it
+        var resumeCandidate: Int64? = nil  // most-recent non-break active task
+        var breakRunStartTs: Int64? = nil  // ts the trailing break run began
+
+        for e in events {
+            let next = nextActiveTask(after: e, current: active)
+            guard next != active else { continue }
+            if next == breakId {
+                // Entering a break run; stamp only the FIRST transition into it.
+                if active != breakId { breakRunStartTs = e.ts }
+            } else if next != nil {
+                // On a real work task: it is the resume candidate, and any
+                // earlier break run is no longer "trailing".
+                resumeCandidate = next
+                breakRunStartTs = nil
+            } else {
+                // stop: the session ended; resuming across a stop is a guess.
+                resumeCandidate = nil
+                breakRunStartTs = nil
+            }
+            active = next
+        }
+
+        // Trailing active task isn't the break task: either we're already on a
+        // work task (mid-break switch — return it; it equals the carried task,
+        // so accrual is unchanged) or the session is stopped/empty (nil).
+        if active != breakId { return active }
+
+        guard let resume = resumeCandidate, let breakStart = breakRunStartTs else {
+            return nil   // nothing to resume: no prior work task before this break run (log starts inside a break, or a stop preceded it)
+        }
+
+        // Staleness anchors to the BREAK's start, not the last work event: the
+        // last work event is the work-phase entry (~a full work phase old on
+        // every normal cycle), which would falsely flag every cycle as stale.
+        // (now − breakStart) measures actual break length vs nominal length.
+        let elapsedMs = Int64(now.timeIntervalSince1970 * 1000) - breakStart
+        let thresholdMs = staleFactor * Double(breakPhase.durationMin) * 60_000
+        return Double(elapsedMs) > thresholdMs ? nil : resume
     }
 
     // MARK: - Switch from ARMED (canonical implicit-ack)
@@ -431,20 +478,24 @@ public final class Store {
                 armedPhaseId: armedPhaseId, profileName: profile.name)
         }
 
-        // Look up the prior work task exactly as Tracker.previousWorkTaskId() does,
-        // so the CLI path (switchFromArmed) and the in-process path (Tracker.advance)
-        // always produce identical phase_advance events. armedTaskId is the break
-        // task's id when advancing out of a break phase, so we exclude it to find
-        // the most-recent real work task before that break.
-        let prevWorkId: Int64? = {
-            guard let breakId = try? self.breakTaskId(), breakId != -1 else { return nil }
-            return try? self.mostRecentWorkTaskId(excludingBreakTaskId: breakId)
-        }()
+        // Resume target exists only when the boundary LEAVES a break phase.
+        // Resolve the armed (leaving) phase the same way nextPhase is resolved;
+        // if it can't be resolved (legacy/foreign id), degrade to nil — the
+        // shared helper then falls back to the carried task. Mirrors
+        // Tracker.advance(), which reads the armed phase from live state.
+        let leavingPhase = resolvePhase(id: armedPhaseId, in: profile)
+        let previousWorkTaskId: Int64?
+        if let leaving = leavingPhase, leaving.accrueAs == "break" {
+            previousWorkTaskId = try self.previousWorkTaskId(
+                leavingBreak: leaving, asOf: Date())
+        } else {
+            previousWorkTaskId = nil
+        }
 
         let accrualTaskId = try accrualTaskId(
             forNextPhase: nextPhase,
             carriedTaskId: armedTaskId,
-            previousWorkTaskId: prevWorkId)
+            previousWorkTaskId: previousWorkTaskId)
 
         // 1) Implicit ack: phase_advance onto the next phase's accrual task.
         try append(Event(
