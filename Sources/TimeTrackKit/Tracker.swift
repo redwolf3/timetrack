@@ -311,22 +311,30 @@ public final class Tracker {
     }
 
     public func advance(comment: String? = nil) {
-        guard case let .armed(taskId, _, _, _) = state,
+        guard case let .armed(taskId, armedPhase, _, _) = state,
               let iter = iterator else { return }
 
         _ = iter.advance()
         let newPhase = iter.currentPhase
         let deadline = Date().addingTimeInterval(Double(newPhase.durationMin * 60))
 
+        // The resume question only exists when LEAVING a break phase: the carried
+        // task is often the synthetic break task, and carrying it into a work
+        // phase would silently drop time. Guard here so ordinary work→work
+        // advances never pay for the event-log walk.
+        let prev: Int64? = (armedPhase.accrueAs == "break")
+            ? (try? store.previousWorkTaskId(leavingBreak: armedPhase, asOf: Date()))
+            : nil
+
         // Determine the task that accrues during the next phase via the SHARED
         // kit helper, so this can never diverge from Store.switchFromArmed (the
         // stateless CLI path). The helper's break branch reads breakTaskId() (it
         // throws); preserve advance()'s historic try?-with-fallback-to-taskId so
-        // behavior is byte-identical to before this refactor.
+        // a read failure degrades to the carried task, never a crash.
         let nextTaskId: Int64 = (try? store.accrualTaskId(
             forNextPhase: newPhase,
             carriedTaskId: taskId,
-            previousWorkTaskId: previousWorkTaskId())) ?? taskId
+            previousWorkTaskId: prev)) ?? taskId
 
         try? store.append(Event(
             id: nil, ts: 0, type: EventType.phaseAdvance.rawValue,
@@ -405,20 +413,4 @@ public final class Tracker {
         }
     }
 
-    // Walk back through recent events to find the most recent non-break taskId.
-    // Used by advance() when transitioning from a break phase back to work, so the
-    // new work phase accrues against the task the user was on BEFORE the break
-    // rather than silently accruing against the break task until the user manually
-    // taps a task row.
-    //
-    // Delegates to Store.mostRecentWorkTaskId() — a single DB query over the last
-    // ~50 state-changing events, cheap and bounded. Returns nil only when no prior
-    // work task exists in the window (e.g. brand-new session that started with a
-    // break), in which case the caller falls back to the carried task id.
-    private func previousWorkTaskId() -> Int64? {
-        guard let breakId = try? store.breakTaskId(), breakId != -1 else {
-            return nil
-        }
-        return try? store.mostRecentWorkTaskId(excludingBreakTaskId: breakId)
-    }
 }

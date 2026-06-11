@@ -278,7 +278,8 @@ final class PhaseAdvanceTests: XCTestCase {
     }
 
     // For a work-phase next-phase (accrueAs == nil), must return the carried task
-    // when previousWorkTaskId is nil (mirrors advance()'s current nil stub).
+    // when previousWorkTaskId is nil (the shared no-resume fallback: no prior work
+    // task, stopped session, or stale break).
     func testAccrualTaskIdReturnsCarriedTaskForNonBreakPhase() throws {
         let store = try makeStore()
         let workTask = try makeTask(store, name: "Work")
