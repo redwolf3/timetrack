@@ -318,8 +318,8 @@ public final class Tracker {
         let newPhase = iter.currentPhase
         let deadline = Date().addingTimeInterval(Double(newPhase.durationMin * 60))
 
-        // The resume question only exists when LEAVING a break: the carried
-        // task is then the synthetic break task, and resuming it into a work
+        // The resume question only exists when LEAVING a break phase: the carried
+        // task is often the synthetic break task, and carrying it into a work
         // phase would silently drop time. Guard here so ordinary work→work
         // advances never pay for the event-log walk.
         let prev: Int64? = (armedPhase.accrueAs == "break")
