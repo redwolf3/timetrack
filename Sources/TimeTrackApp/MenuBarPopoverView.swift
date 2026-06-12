@@ -57,9 +57,10 @@ struct MenuBarPopoverView: View {
             }
 
             // ── Profile picker ────────────────────────────────────────────────
-            Divider()
-            profilePickerRow
-
+            if appState.profiles.count > 1 {
+                Divider()
+                profilePickerRow
+            }
             // ── Quit ──────────────────────────────────────────────────────────
             Divider()
             quitRow
