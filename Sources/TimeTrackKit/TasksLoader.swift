@@ -13,14 +13,18 @@ import Yams
 // This type is a platform-agnostic utility in TimeTrackKit. No AppKit, no UI.
 public enum TasksLoader {
 
-    // Thrown when the yaml file fails business-rule validation.
-    // Descriptive messages name the offending value so the user can fix the file.
+    // Thrown when the yaml file fails business-rule validation, or when the
+    // DB state makes an entry's identity ambiguous (the tasks table has no
+    // UNIQUE constraint on code or name, so duplicates can pre-exist).
+    // Descriptive messages name the offending value so the user can fix it.
     public enum ValidationError: Error, CustomStringConvertible {
         case emptyName
         case duplicateCode(String)
         case duplicateCodelessName(String)
         case reservedCategory(String)   // "break" is synthetic; user tasks must not claim it
         case unknownCategory(String)
+        case ambiguousCode(String, ids: [Int64])
+        case ambiguousCodelessName(String, ids: [Int64])
 
         public var description: String {
             switch self {
@@ -34,6 +38,10 @@ public enum TasksLoader {
                 return "tasks.yaml: task '\(name)' uses category 'break', which is reserved for the synthetic break task"
             case .unknownCategory(let cat):
                 return "tasks.yaml: unknown category '\(cat)' — must be one of: project, overhead, meeting"
+            case .ambiguousCode(let code, let ids):
+                return "tasks.yaml: code '\(code)' matches multiple existing tasks (ids \(ids.map(String.init).joined(separator: ", "))) — archive or merge the duplicates, then re-run"
+            case .ambiguousCodelessName(let name, let ids):
+                return "tasks.yaml: name '\(name)' matches multiple existing code-less tasks (ids \(ids.map(String.init).joined(separator: ", "))) — archive or merge the duplicates, then re-run"
             }
         }
     }
@@ -83,8 +91,15 @@ public enum TasksLoader {
         var insertedOrUpdated = 0
         for entry in entries {
             if let code = entry.code {
-                // Code-keyed entry: identity is the code.
-                if let row = existing.first(where: { $0.code == code && $0.category != "break" }) {
+                // Code-keyed entry: identity is the code. The tasks table has no
+                // UNIQUE constraint on code, so pre-existing duplicates would make
+                // "which row do I update" arbitrary — fail loudly instead of
+                // silently picking one (no heuristic ever decides; see CLAUDE.md).
+                let matches = existing.filter { $0.code == code && $0.category != "break" }
+                guard matches.count <= 1 else {
+                    throw ValidationError.ambiguousCode(code, ids: matches.compactMap(\.id))
+                }
+                if let row = matches.first {
                     // Update if name or category differs.
                     if row.name != entry.name || row.category != entry.category {
                         var updated = row
@@ -102,8 +117,16 @@ public enum TasksLoader {
                 }
             } else {
                 // Code-less entry: identity is the exact name among code-less rows.
-                let codelessExisting = existing.filter { $0.code == nil && $0.category != "break" }
-                if let row = codelessExisting.first(where: { $0.name == entry.name }) {
+                // Same ambiguity guard as the code-keyed branch: duplicate names
+                // can pre-exist (no UNIQUE constraint), and updating an arbitrary
+                // one would silently reattribute the yaml edit.
+                let matches = existing.filter {
+                    $0.code == nil && $0.category != "break" && $0.name == entry.name
+                }
+                guard matches.count <= 1 else {
+                    throw ValidationError.ambiguousCodelessName(entry.name, ids: matches.compactMap(\.id))
+                }
+                if let row = matches.first {
                     if row.category != entry.category {
                         var updated = row
                         updated.category = entry.category
@@ -150,14 +173,22 @@ public enum TasksLoader {
         var entries: [Entry] = []
 
         for raw in wrapper.tasks {
-            let name = raw.name.trimmingCharacters(in: .whitespaces)
+            // Trim all fields with .whitespacesAndNewlines (.whitespaces alone
+            // misses newlines, which quoted YAML scalars can carry): a
+            // newline-only name must fail emptyName, and "project " must not
+            // fail as an unknown category.
+            let name = raw.name.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !name.isEmpty else { throw ValidationError.emptyName }
 
             let code: String? = raw.code.flatMap {
-                let t = $0.trimmingCharacters(in: .whitespaces)
+                let t = $0.trimmingCharacters(in: .whitespacesAndNewlines)
                 return t.isEmpty ? nil : t
             }
-            let category = raw.category ?? "project"
+            // Whitespace-only category is treated as absent, same as code.
+            let category: String = raw.category.flatMap {
+                let t = $0.trimmingCharacters(in: .whitespacesAndNewlines)
+                return t.isEmpty ? nil : t
+            } ?? "project"
 
             // Category validation: reject "break" before the generic unknown check
             // so the error message is maximally informative.

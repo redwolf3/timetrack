@@ -243,6 +243,79 @@ final class TasksLoaderTests: XCTestCase {
         XCTAssertEqual(tasks[0].category, "project")
     }
 
+    // Quoted YAML scalars can carry newlines/tabs past a .whitespaces-only trim,
+    // and an untrimmed category like "project " must not fail as unknown.
+    func testNewlineAndTabWhitespaceTrimmedFromAllFields() throws {
+        let dir = try makeTmpDir()
+        let store = try makeStore(in: dir)
+
+        let yaml = """
+        tasks:
+          - name: "\\n\\tPadded task\\n"
+            code: "\\nPROJ-9\\t"
+            category: "project\\n "
+        """
+        let url = try writeYAML(yaml, to: dir)
+
+        XCTAssertEqual(try TasksLoader.ingest(from: url, into: store), 1)
+        let row = try XCTUnwrap(store.tasks(includeArchived: true).first { $0.code == "PROJ-9" })
+        XCTAssertEqual(row.name, "Padded task")
+        XCTAssertEqual(row.category, "project")
+    }
+
+    func testNewlineOnlyNameThrowsEmptyName() throws {
+        let dir = try makeTmpDir()
+        let store = try makeStore(in: dir)
+        let url = try writeYAML("tasks:\n  - name: \"\\n\\t\"\n", to: dir)
+
+        XCTAssertThrowsError(try TasksLoader.ingest(from: url, into: store)) { error in
+            guard case TasksLoader.ValidationError.emptyName = error else {
+                return XCTFail("expected .emptyName, got \(error)")
+            }
+        }
+    }
+
+    // The tasks table has no UNIQUE constraint on code: if duplicates pre-exist,
+    // ingest must refuse to pick a row arbitrarily and name the offenders.
+    func testPreexistingDuplicateCodeThrowsAmbiguous() throws {
+        let dir = try makeTmpDir()
+        let store = try makeStore(in: dir)
+        let a = try store.upsertTask(Task(id: nil, name: "First", code: "PROJ-1",
+                                          category: "project", archived: false))
+        let b = try store.upsertTask(Task(id: nil, name: "Second", code: "PROJ-1",
+                                          category: "project", archived: false))
+        let url = try writeYAML("tasks:\n  - name: Renamed\n    code: PROJ-1\n", to: dir)
+
+        XCTAssertThrowsError(try TasksLoader.ingest(from: url, into: store)) { error in
+            guard case TasksLoader.ValidationError.ambiguousCode(let code, let ids) = error else {
+                return XCTFail("expected .ambiguousCode, got \(error)")
+            }
+            XCTAssertEqual(code, "PROJ-1")
+            XCTAssertEqual(Set(ids), Set([a.id, b.id].compactMap { $0 }))
+        }
+        // Neither row may have been touched.
+        let rows = try store.tasks(includeArchived: true).filter { $0.code == "PROJ-1" }
+        XCTAssertEqual(Set(rows.map(\.name)), ["First", "Second"])
+    }
+
+    func testPreexistingDuplicateCodelessNameThrowsAmbiguous() throws {
+        let dir = try makeTmpDir()
+        let store = try makeStore(in: dir)
+        _ = try store.upsertTask(Task(id: nil, name: "Overhead", code: nil,
+                                      category: "project", archived: false))
+        _ = try store.upsertTask(Task(id: nil, name: "Overhead", code: nil,
+                                      category: "overhead", archived: true))
+        let url = try writeYAML("tasks:\n  - name: Overhead\n    category: overhead\n", to: dir)
+
+        XCTAssertThrowsError(try TasksLoader.ingest(from: url, into: store)) { error in
+            guard case TasksLoader.ValidationError.ambiguousCodelessName(let name, let ids) = error else {
+                return XCTFail("expected .ambiguousCodelessName, got \(error)")
+            }
+            XCTAssertEqual(name, "Overhead")
+            XCTAssertEqual(ids.count, 2)
+        }
+    }
+
     // MARK: - Validation errors
 
     func testDuplicateCodeThrows() throws {
