@@ -268,6 +268,13 @@ final class AppState: ObservableObject {
 
         // Refresh task list and profiles from tracker (they change rarely).
         tasks = tracker.tasks.filter { $0.category != "break" }
+        refreshProfilePublished()
+    }
+
+    // Mirrors profile-related @Published properties from the tracker's authoritative
+    // state. Called at the end of updatePublished and after setProfile to ensure
+    // both transition-driven and direct-mutation paths stay consistent.
+    private func refreshProfilePublished() {
         profiles = tracker.profiles
         selectedProfileName = tracker.profileName
     }
@@ -340,7 +347,15 @@ final class AppState: ObservableObject {
     }
 
     func setProfile(_ name: String) {
+        // Guard against the feedback loop where refreshProfilePublished() updates
+        // selectedProfileName, which re-triggers the Picker's .onChange with the
+        // already-current name. tracker.setProfile is idempotent for the same name
+        // but appends a DB event — skip if the kit already agrees.
+        guard name != tracker.profileName else { return }
         tracker.setProfile(name)
+        // Sync immediately — tracker.setProfile may not emit a state event when idle
+        // (no stop()/start() path runs), so updatePublished is never called.
+        refreshProfilePublished()
     }
 
     func logInterruption(comment: String) {
