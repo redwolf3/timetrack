@@ -89,6 +89,18 @@ public enum CLI {
             return
         }
 
+        // Ingest optional tasks.yaml into the store so CLI-only workflows also
+        // see yaml-sourced tasks (overhead, recurring projects). Only start and
+        // switch resolve task names, so only they can observe yaml entries —
+        // gating here keeps read-only commands (status, report, …) off the
+        // store's write path entirely, per the two-process WAL caveat in
+        // CLAUDE.md. Missing file is a silent no-op. Validation failures
+        // propagate as CLIError-compatible throws — main.swift will print the
+        // description and exit non-zero.
+        if command == "start" || command == "switch" {
+            try TasksLoader.ingest(from: dir.appendingPathComponent("tasks.yaml"), into: store)
+        }
+
         let rest = Array(arguments.dropFirst())
         switch command {
         case "start":      try cmdStart(rest, store: store, dataDir: dir, out: out)

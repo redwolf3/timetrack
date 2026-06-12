@@ -24,6 +24,12 @@ struct TimeTrackSwiftUIApp: App {
         let profilesURL = dir.appendingPathComponent("profiles.yaml")
         do {
             let store = try Store(url: dbURL)
+            // Ingest optional tasks.yaml. Missing file is a silent no-op; a
+            // validation error (duplicate code, reserved category, etc.) is fatal
+            // at startup — same severity as a corrupt profiles.yaml — because a
+            // yaml the user edited with conflicting entries cannot be silently
+            // ignored without hiding a bug.
+            try TasksLoader.ingest(from: dir.appendingPathComponent("tasks.yaml"), into: store)
             return try AppState(store: store, profilesURL: profilesURL)
         } catch {
             fatalError("TimeTrackApp: failed to open store or init AppState: \(error)")
