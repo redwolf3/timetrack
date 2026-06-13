@@ -18,6 +18,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # The swift image is a minimal toolchain and does NOT ship the SQLite
+      # development headers; GRDB's CSQLite module needs <sqlite3.h>. The old
+      # ubuntu-latest runner had libsqlite3-dev preinstalled — the container
+      # doesn't, so install it explicitly. (Container runs as root: no sudo.)
+      - name: Install SQLite dev headers
+        run: apt-get update && apt-get install -y libsqlite3-dev
+
       # Build only the kit target — TimeTrackApp depends on HotKey/AppKit and
       # cannot compile on Linux.  The test step implicitly rebuilds the kit.
       - name: Build TimeTrackKit
