@@ -9,13 +9,14 @@ jobs:
   test:
     name: swift build & test (Ubuntu)
     runs-on: ubuntu-latest
+    # Run inside the official Swift image instead of swift-actions/setup-swift.
+    # That action has no Node 24 release (every tag still declares using: node20),
+    # so it can't be bumped off the deprecated runtime. The container ships the
+    # toolchain directly, removing the only Node-based Swift-setup action; the
+    # one remaining JS action (checkout) is on node24 below.
+    container: swift:5.10
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Swift
-        uses: swift-actions/setup-swift@v2
-        with:
-          swift-version: "5.10"
+      - uses: actions/checkout@v5
 
       # Build only the kit target — TimeTrackApp depends on HotKey/AppKit and
       # cannot compile on Linux.  The test step implicitly rebuilds the kit.
