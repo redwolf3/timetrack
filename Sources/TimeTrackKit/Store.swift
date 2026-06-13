@@ -659,12 +659,21 @@ public final class Store {
 
     /// Per-day task summaries for the last `days` calendar days, most-recent first.
     ///
-    /// `asOf` defaults to now; injectable for deterministic tests.
-    /// Day 0 is the calendar day containing `asOf` ("today"); it includes only
-    /// elapsed time so far (report() already closes the open interval at
-    /// min(endOfDay, now)). Exactly `days` entries are always returned, even for
-    /// days with no activity (empty rows, totalSeconds == 0).
+    /// `asOf` anchors WHICH calendar days are returned: index 0 is the day
+    /// containing `asOf`, index 1 the day before, etc. It does NOT control the
+    /// open-interval close time — each day is computed by report(day:), which
+    /// clamps any still-open interval at min(endOfDay, wall-clock now). So a day
+    /// that is genuinely "today" in real time closes at now; any day already in
+    /// the past closes at end-of-day. `asOf` lets tests pick a deterministic
+    /// calendar window, not simulate "now" mid-day.
+    ///
+    /// Exactly `days` entries are returned, even for days with no activity (empty
+    /// rows, totalSeconds == 0). `days <= 0` returns an empty array.
     public func recentReport(days: Int, asOf: Date = Date()) throws -> [DaySummary] {
+        // Negative/zero days: nothing to report. Guard before reserveCapacity and
+        // the 0..<days range, both of which trap on a negative argument.
+        guard days > 0 else { return [] }
+
         // Anchor every day calculation to the startOfDay of asOf so "today"
         // matches report(day:)'s own Calendar.current.startOfDay(for:) calls.
         let cal = Calendar.current

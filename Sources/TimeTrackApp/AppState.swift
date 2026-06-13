@@ -377,6 +377,15 @@ final class AppState: ObservableObject {
         history = (try? store.recentReport(days: days)) ?? []
     }
 
+    // Cached formatter for the dated fallback label. DateFormatter construction
+    // is relatively expensive and dayLabel(for:) is called per row per redraw, so
+    // one shared instance avoids repeated allocations.
+    private static let dayLabelFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "EEE · MMM d"
+        return f
+    }()
+
     // Formats a day Date as "Today", "Yesterday", or "Mon · Mar 15".
     // Lives here (not in the view) per CLAUDE.md invariant 3: no presentation
     // logic in views — Calendar/DateFormatter computations are logic, not rendering.
@@ -384,9 +393,7 @@ final class AppState: ObservableObject {
         let cal = Calendar.current
         if cal.isDateInToday(day)     { return "Today" }
         if cal.isDateInYesterday(day) { return "Yesterday" }
-        let formatter = DateFormatter()
-        formatter.dateFormat = "EEE · MMM d"
-        return formatter.string(from: day)
+        return Self.dayLabelFormatter.string(from: day)
     }
 
     // Formats a seconds count as a compact human-readable string.
@@ -405,19 +412,28 @@ final class AppState: ObservableObject {
         }
     }
 
-    // Relaunches the app by spawning a detached shell that opens a NEW instance,
-    // then terminates the current process. Standard macOS menu-bar relaunch idiom.
+    // Relaunches the app by opening a NEW instance, then terminating this one.
+    // Standard macOS menu-bar relaunch idiom.
     func relaunch() {
-        let path = Bundle.main.bundleURL.path
-        // open -n forces a new instance (plain `open` would just re-activate the
-        // still-running current process); the brief sleep lets the relaunch begin
-        // before terminate() tears this process down.
-        let escaped = path.replacingOccurrences(of: "'", with: "'\\''")
+        // `open -n` forces a brand-new instance (plain `open` would only
+        // re-activate the still-running current process). Run /usr/bin/open
+        // directly — no shell, so no path quoting/escaping. -n also defeats the
+        // re-activation race, so no artificial delay is needed: launchd spawns
+        // the new instance independently of this process exiting.
         let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/bin/sh")
-        proc.arguments = ["-c", "sleep 0.3; open -n '\(escaped)'"]
-        try? proc.run()
-        NSApplication.shared.terminate(nil)
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        proc.arguments = ["-n", Bundle.main.bundleURL.path]
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+            // Only quit if the relaunch was actually requested successfully;
+            // otherwise leave the current instance running rather than stranding
+            // the user with the app quit but not restarted.
+            guard proc.terminationStatus == 0 else { return }
+            NSApplication.shared.terminate(nil)
+        } catch {
+            return
+        }
     }
 }
 #endif

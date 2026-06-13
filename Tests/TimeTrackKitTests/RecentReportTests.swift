@@ -3,18 +3,20 @@ import XCTest
 
 // Tests for Store.recentReport(days:asOf:).
 //
-// Determinism: all tests inject a fixed `asOf` date so behaviour is independent
-// of wall-clock now. Events are built with explicit `ts` values computed from
-// `asOf`'s startOfDay, matching report(day:)'s own Calendar.current anchoring.
-// "Past day" offsets keep every event in the past, so the report's
-// min(endOfDay, now) closeTs clamps only today's open interval, not prior days.
+// Determinism comes from two things, NOT from asOf controlling "now":
+//   1. A fixed `asOf` picks a deterministic calendar window (which days are
+//      returned), matching report(day:)'s Calendar.current.startOfDay anchoring.
+//   2. Every event is a CLOSED start/stop interval placed on a day at or before
+//      `asOf` — and since `asOf` (2025) is in the real past, report(day:)'s
+//      min(endOfDay, wall-clock-now) clamp always resolves to end-of-day for
+//      every bucket here. No test relies on an open interval being clamped at
+//      `asOf`, because asOf does NOT drive that clamp (report() uses real now).
 final class RecentReportTests: XCTestCase {
 
     // MARK: - Helpers
 
-    // Fixed reference point: noon on 2025-03-15 (a Saturday).
-    // Noon means startOfDay is six hours in the past from asOf — today's events
-    // before noon count; the open interval closes at "now" (asOf), not end-of-day.
+    // Fixed reference point: noon on 2025-03-15 (a Saturday). Real "now" is
+    // later than this, so every bucket is treated as a fully-elapsed past day.
     private let asOf: Date = {
         var comps = DateComponents()
         comps.year = 2025; comps.month = 3; comps.day = 15
@@ -79,6 +81,13 @@ final class RecentReportTests: XCTestCase {
         let result = try store.recentReport(days: 1, asOf: asOf)
         XCTAssertEqual(result.count, 1)
         XCTAssertEqual(result[0].day, dayStart(daysAgo: 0))
+    }
+
+    // Guard against the reserveCapacity / 0..<days traps on non-positive input.
+    func testNonPositiveDaysReturnsEmpty() throws {
+        let store = try makeStore()
+        XCTAssertEqual(try store.recentReport(days: 0, asOf: asOf).count, 0)
+        XCTAssertEqual(try store.recentReport(days: -3, asOf: asOf).count, 0)
     }
 
     // MARK: - 2. Empty day yields empty rows and zero total
