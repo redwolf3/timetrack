@@ -361,5 +361,79 @@ final class AppState: ObservableObject {
     func logInterruption(comment: String) {
         tracker.logInterruption(comment: comment)
     }
+
+    // MARK: - History (Phase 6B)
+
+    // Snapshot of recent per-day summaries, refreshed lazily when the history
+    // panel is opened. Never refreshed on the 1 Hz tick (wasteful). Views read
+    // this @Published property directly — no synchronous DB calls in body.
+    @Published private(set) var history: [Store.DaySummary] = []
+
+    // Fetches recent history into the published snapshot. Called from
+    // HistoryView.onAppear (and/or when the history disclosure is toggled on)
+    // so the data is always fresh when the panel is visible. Errors are swallowed
+    // into an empty array — history is read-only and non-critical.
+    func refreshHistory(days: Int = 7) {
+        history = (try? store.recentReport(days: days)) ?? []
+    }
+
+    // Cached formatter for the dated fallback label. DateFormatter construction
+    // is relatively expensive and dayLabel(for:) is called per row per redraw, so
+    // one shared instance avoids repeated allocations.
+    private static let dayLabelFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "EEE · MMM d"
+        return f
+    }()
+
+    // Formats a day Date as "Today", "Yesterday", or "Mon · Mar 15".
+    // Lives here (not in the view) per CLAUDE.md invariant 3: no presentation
+    // logic in views — Calendar/DateFormatter computations are logic, not rendering.
+    func dayLabel(for day: Date) -> String {
+        let cal = Calendar.current
+        if cal.isDateInToday(day)     { return "Today" }
+        if cal.isDateInYesterday(day) { return "Yesterday" }
+        return Self.dayLabelFormatter.string(from: day)
+    }
+
+    // Formats a seconds count as a compact human-readable string.
+    // Used by the history view; matches TaskRowView's todayAnnotation logic.
+    func formatDuration(_ seconds: Int) -> String {
+        let m = seconds / 60
+        let h = m / 60
+        if h > 0 {
+            return "\(h)h \(m % 60)m"
+        } else if m > 0 {
+            return "\(m)m"
+        } else if seconds > 0 {
+            return "<1m"
+        } else {
+            return "0m"
+        }
+    }
+
+    // Relaunches the app by opening a NEW instance, then terminating this one.
+    // Standard macOS menu-bar relaunch idiom.
+    func relaunch() {
+        // `open -n` forces a brand-new instance (plain `open` would only
+        // re-activate the still-running current process). Run /usr/bin/open
+        // directly — no shell, so no path quoting/escaping. -n also defeats the
+        // re-activation race, so no artificial delay is needed: launchd spawns
+        // the new instance independently of this process exiting.
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        proc.arguments = ["-n", Bundle.main.bundleURL.path]
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+            // Only quit if the relaunch was actually requested successfully;
+            // otherwise leave the current instance running rather than stranding
+            // the user with the app quit but not restarted.
+            guard proc.terminationStatus == 0 else { return }
+            NSApplication.shared.terminate(nil)
+        } catch {
+            return
+        }
+    }
 }
 #endif

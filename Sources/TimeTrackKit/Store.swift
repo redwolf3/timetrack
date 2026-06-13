@@ -643,6 +643,55 @@ public final class Store {
         }
     }
 
+    // MARK: - Recent history (multi-day summary)
+
+    // Per-day aggregation of task time, reusing the battle-tested report(day:)
+    // logic including idle-resolve reattribution and open-interval handling.
+    // Callers (popover history view) can filter out zero-activity days; we
+    // always return exactly `days` entries so the view gets a stable row per day.
+    public struct DaySummary {
+        public let day: Date           // startOfDay for that calendar day
+        public let rows: [DayRow]      // per-task totals, sorted desc by seconds
+
+        // Computed from rows so the view never touches raw seconds arithmetic.
+        public var totalSeconds: Int { rows.reduce(0) { $0 + $1.totalSeconds } }
+    }
+
+    /// Per-day task summaries for the last `days` calendar days, most-recent first.
+    ///
+    /// `asOf` anchors WHICH calendar days are returned: index 0 is the day
+    /// containing `asOf`, index 1 the day before, etc. It does NOT control the
+    /// open-interval close time — each day is computed by report(day:), which
+    /// clamps any still-open interval at min(endOfDay, wall-clock now). So a day
+    /// that is genuinely "today" in real time closes at now; any day already in
+    /// the past closes at end-of-day. `asOf` lets tests pick a deterministic
+    /// calendar window, not simulate "now" mid-day.
+    ///
+    /// Exactly `days` entries are returned, even for days with no activity (empty
+    /// rows, totalSeconds == 0). `days <= 0` returns an empty array.
+    public func recentReport(days: Int, asOf: Date = Date()) throws -> [DaySummary] {
+        // Negative/zero days: nothing to report. Guard before reserveCapacity and
+        // the 0..<days range, both of which trap on a negative argument.
+        guard days > 0 else { return [] }
+
+        // Anchor every day calculation to the startOfDay of asOf so "today"
+        // matches report(day:)'s own Calendar.current.startOfDay(for:) calls.
+        let cal = Calendar.current
+        let todayStart = cal.startOfDay(for: asOf)
+
+        var summaries: [DaySummary] = []
+        summaries.reserveCapacity(days)
+
+        for i in 0 ..< days {
+            // i == 0 → today; i == 1 → yesterday; etc.
+            let dayStart = cal.date(byAdding: .day, value: -i, to: todayStart)!
+            let rows = try report(day: dayStart)
+            summaries.append(DaySummary(day: dayStart, rows: rows))
+        }
+
+        return summaries
+    }
+
     // MARK: - Known Tasks registry (prep)
     //
     // The curated spine. The only valid reconciliation target. Provisional

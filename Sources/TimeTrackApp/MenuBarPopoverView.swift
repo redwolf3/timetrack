@@ -21,6 +21,9 @@ struct MenuBarPopoverView: View {
     @State private var extendMinutesText: String = ""
     @FocusState private var extendFocused: Bool
 
+    // History panel: toggled by the "History" disclosure row at the bottom.
+    @State private var showHistory: Bool = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
 
@@ -61,9 +64,17 @@ struct MenuBarPopoverView: View {
                 Divider()
                 profilePickerRow
             }
-            // ── Quit ──────────────────────────────────────────────────────────
+            // ── History (collapsible) ─────────────────────────────────────────
             Divider()
-            quitRow
+            historyDisclosureRow
+            if showHistory {
+                HistoryView()
+                    .frame(maxHeight: 240)
+                Divider()
+            }
+
+            // ── Quit / Restart ────────────────────────────────────────────────
+            quitRestartRow
         }
         .frame(width: 280)
         .background(.regularMaterial)
@@ -200,11 +211,50 @@ struct MenuBarPopoverView: View {
         .padding(.vertical, 8)
     }
 
-    // MARK: - Quit row
+    // MARK: - History disclosure row
 
-    private var quitRow: some View {
+    // Toggles the HistoryView panel inline. A disclosure chevron signals
+    // expand/collapse, matching the popover's existing plain-button visual language.
+    private var historyDisclosureRow: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.15)) {
+                showHistory.toggle()
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: showHistory ? "chevron.down" : "chevron.right")
+                    .imageScale(.small)
+                    .foregroundStyle(.secondary)
+                Text("History")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+
+    // MARK: - Quit / Restart row
+
+    // Standard macOS menu-bar affordances grouped together (DESIGN.md: Phase 6).
+    // Restart relaunches the current bundle via /usr/bin/open then terminates,
+    // which is the conventional macOS relaunch idiom without a helper executable.
+    private var quitRestartRow: some View {
         HStack {
             Spacer()
+            Button("Restart") {
+                appState.relaunch()
+            }
+            .buttonStyle(.plain)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            Text("·")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
             Button("Quit TimeTrack") {
                 NSApplication.shared.terminate(nil)
             }
