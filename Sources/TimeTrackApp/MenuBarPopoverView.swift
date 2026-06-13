@@ -24,6 +24,9 @@ struct MenuBarPopoverView: View {
     // History panel: toggled by the "History" disclosure row at the bottom.
     @State private var showHistory: Bool = false
 
+    // Reconcile panel: toggled by the "Reconcile" disclosure row.
+    @State private var showReconcile: Bool = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
 
@@ -69,6 +72,15 @@ struct MenuBarPopoverView: View {
             historyDisclosureRow
             if showHistory {
                 HistoryView()
+                    .frame(maxHeight: 240)
+                Divider()
+            }
+
+            // ── Reconcile (collapsible) ───────────────────────────────────────
+            Divider()
+            reconcileDisclosureRow
+            if showReconcile {
+                ReconcileView()
                     .frame(maxHeight: 240)
                 Divider()
             }
@@ -226,6 +238,31 @@ struct MenuBarPopoverView: View {
                     .imageScale(.small)
                     .foregroundStyle(.secondary)
                 Text("History")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+
+    // MARK: - Reconcile disclosure row
+
+    // Toggles the ReconcileView panel. Identical structure to historyDisclosureRow
+    // (lines 218–237): plain-button style, chevron indicates expand/collapse.
+    private var reconcileDisclosureRow: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.15)) {
+                showReconcile.toggle()
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: showReconcile ? "chevron.down" : "chevron.right")
+                    .imageScale(.small)
+                    .foregroundStyle(.secondary)
+                Text("Reconcile")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()

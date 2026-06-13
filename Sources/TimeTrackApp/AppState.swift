@@ -377,6 +377,62 @@ final class AppState: ObservableObject {
         history = (try? store.recentReport(days: days)) ?? []
     }
 
+    // MARK: - Reconcile (in-app reconcile UI)
+
+    // Snapshots refreshed lazily when the reconcile panel opens. Views read these
+    // directly — no store calls in body. All gate logic lives in AppState; the
+    // view only renders and calls action methods.
+    @Published private(set) var reconcileUnbound: [Store.UnreconciledTask] = []
+    @Published private(set) var reconcileProvisional: [KnownTask] = []
+    @Published private(set) var reconcileKnownTasks: [KnownTask] = []
+    // True when both gates are clear after a refresh — the view reads this flag;
+    // it never recomputes it. Avoids putting gate logic (&&) in the view.
+    @Published private(set) var reconcileIsClean: Bool = false
+
+    // Trailing 14 calendar days: today (startOfDay) minus 13 days to today.
+    // Rationale: CLI default ("today only") is too narrow for users who haven't
+    // reconciled in a few days. 14 days covers two work weeks — the natural
+    // timesheet submission cycle — without requiring scroll or a date picker.
+    // One week risks missing Monday when opened on Friday after a full week.
+    private var reconcileWindow: (from: Date, to: Date) {
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: Date())
+        let from = cal.date(byAdding: .day, value: -13, to: today)!
+        return (from: from, to: today)
+    }
+
+    // Re-fetches all reconcile state from the store. Called from
+    // ReconcileView.onAppear — synchronous GRDB on @MainActor, matching
+    // refreshHistory's pattern. Errors swallow to empty arrays; if the store
+    // throws the user sees an empty/clean panel which is a safe failure mode.
+    func refreshReconcile() {
+        let w = reconcileWindow
+        reconcileUnbound    = (try? store.unreconciled(from: w.from, to: w.to)) ?? []
+        reconcileProvisional = (try? store.provisionalWithTime(from: w.from, to: w.to)) ?? []
+        reconcileKnownTasks  = (try? store.knownTasks(activeOnly: true)) ?? []
+        reconcileIsClean     = reconcileUnbound.isEmpty && reconcileProvisional.isEmpty
+    }
+
+    // Binds an ad-hoc capture task to a Known Task registry entry.
+    // References the registry id (never the raw JIRA key) so a subsequent
+    // promoteKnownTask call propagates to this binding automatically — invariant
+    // from CLAUDE.md. Error is swallowed; refreshReconcile still runs so the
+    // row stays visible if the bind failed (safe failure mode).
+    func reconcileBind(taskId: Int64, knownTaskId: Int64) {
+        try? store.bind(taskId: taskId, knownTaskId: knownTaskId, comment: nil)
+        refreshReconcile()
+    }
+
+    // Promotes a provisional Known Task by assigning its real JIRA key.
+    // Trimming and empty-key guard live here (not in the view) per CLAUDE.md
+    // invariant 3. Matches the trimming pattern from TasksLoader (prior PR).
+    func reconcilePromote(id: Int64, jiraKey: String) {
+        let trimmed = jiraKey.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        try? store.promoteKnownTask(id: id, jiraKey: trimmed)
+        refreshReconcile()
+    }
+
     // Cached formatter for the dated fallback label. DateFormatter construction
     // is relatively expensive and dayLabel(for:) is called per row per redraw, so
     // one shared instance avoids repeated allocations.

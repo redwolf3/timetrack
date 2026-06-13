@@ -106,6 +106,54 @@ final class ReconcileGateTests: XCTestCase {
         XCTAssertGreaterThan(row.totalSeconds, 0, "Reported time should be positive")
     }
 
+    // Promoting a provisional Known Task must clear it from provisionalWithTime
+    // and let reconciledReport resolve the real key. This guards the append-only
+    // overlay: promoteKnownTask writes a known_task_promote EVENT and never
+    // mutates the base known_tasks row, so a raw KnownTask.fetchOne would still
+    // report provisional == true forever — the entry would never leave the
+    // provisional gate and the in-app promote action would appear to do nothing.
+    // provisionalWithTime/reconciledReport must read knownTasks()'s overlay.
+    func testPromoteClearsProvisionalViaEventOverlay() throws {
+        let dir = try makeTmpDir()
+        let store = try Store(url: dir.appendingPathComponent("test.db"))
+
+        var task = Task(id: nil, name: "WIP", code: nil, category: "project", archived: false)
+        task = try store.upsertTask(task)
+        let taskId = try XCTUnwrap(task.id)
+
+        // Bind to a PROVISIONAL Known Task (no jiraKey yet).
+        let kt = try store.addKnownTask(jiraKey: nil, description: "Loose entry")
+        let ktId = try XCTUnwrap(kt.id)
+        try store.bind(taskId: taskId, knownTaskId: ktId, comment: nil)
+
+        // Anchor the tracked hour to a FIXED PAST day so the real-now bind/promote
+        // events (ts = now) fall outside the report window and cannot split the
+        // interval (report() truncates per-segment ms, losing ~1s on a split).
+        let cal = Calendar.current
+        let pastDay = cal.date(byAdding: .day, value: -3, to: cal.startOfDay(for: Date()))!
+        try appendOneHour(store: store, taskId: taskId, day: pastDay)
+        let (from, to) = (pastDay, pastDay)
+
+        // Before promote: provisional-with-time lists it; the gate blocks.
+        XCTAssertTrue(try store.provisionalWithTime(from: from, to: to).contains { $0.id == ktId },
+                      "provisional entry with bound time must appear before promote")
+        XCTAssertThrowsError(try store.reconciledReport(from: from, to: to)) { err in
+            guard case Store.ReconcileError.provisional = err else {
+                return XCTFail("expected .provisional, got \(err)")
+            }
+        }
+
+        // Promote (append-only: base row keeps provisional == true).
+        XCTAssertTrue(try store.promoteKnownTask(id: ktId, jiraKey: "JIRA-9"))
+
+        // After promote: must clear from provisionalWithTime and reconcile cleanly.
+        XCTAssertFalse(try store.provisionalWithTime(from: from, to: to).contains { $0.id == ktId },
+                       "promoted entry must clear from provisionalWithTime (event overlay applied)")
+        let rows = try store.reconciledReport(from: from, to: to)
+        XCTAssertTrue(rows.contains { $0.jiraKey == "JIRA-9" },
+                      "reconciledReport must resolve the promoted key JIRA-9")
+    }
+
     // Break task time is never reportable and must not block the gate.
     func testBreakTimeExcludedFromGate() throws {
         let dir = try makeTmpDir()
