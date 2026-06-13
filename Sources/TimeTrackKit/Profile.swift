@@ -177,6 +177,21 @@ final class CycleIterator {
 // Public so the stateless CLI can load the same profile set the app uses when
 // it must reconstruct phase math from the event log (e.g. switch-from-ARMED).
 public enum ProfileLoader {
+
+    // Thrown when profiles.yaml fails validation. Profile name is the identity
+    // used by setProfile(name:) and SwiftUI Picker tags, so duplicates must
+    // fail loudly at load — ambiguous resolution is worse than a startup error.
+    public enum ValidationError: Error, CustomStringConvertible {
+        case duplicateName(String)
+
+        public var description: String {
+            switch self {
+            case .duplicateName(let name):
+                return "profiles.yaml: duplicate profile name '\(name)' — each name must be unique"
+            }
+        }
+    }
+
     public static func loadAll(from url: URL) throws -> [Profile] {
         if !FileManager.default.fileExists(atPath: url.path) {
             try seedDefaults(to: url)
@@ -184,7 +199,20 @@ public enum ProfileLoader {
         let yaml = try String(contentsOf: url, encoding: .utf8)
         struct Wrapper: Codable { let profiles: [Profile] }
         let decoder = YAMLDecoder()
-        return try decoder.decode(Wrapper.self, from: yaml).profiles
+        let profiles = try decoder.decode(Wrapper.self, from: yaml).profiles
+
+        // Detect duplicates. Profile name is the identity key for setProfile
+        // and Picker tags; duplicates would render ambiguously or silently pick
+        // the wrong profile, so we fail loudly here rather than at first use.
+        var seen: Set<String> = []
+        for profile in profiles {
+            if seen.contains(profile.name) {
+                throw ValidationError.duplicateName(profile.name)
+            }
+            seen.insert(profile.name)
+        }
+
+        return profiles
     }
 
     private static func seedDefaults(to url: URL) throws {
