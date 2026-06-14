@@ -880,15 +880,29 @@ public final class Store {
         for (tid, secs) in perTask {
             if let ktid = binds[tid] { perKnown[ktid, default: 0] += secs }
         }
-        return try dbQueue.read { db in
-            var out: [KnownTask] = []
-            for (ktid, secs) in perKnown where secs > 0 {
-                if let k = try KnownTask.fetchOne(db, key: ktid), k.provisional {
-                    out.append(k)
-                }
+        // Use the overlay-applied knownTasks() rather than raw KnownTask.fetchOne so
+        // that promote events are reflected: promoteKnownTask() is append-only and
+        // never mutates the base row, so k.provisional on the raw row is always true
+        // after promotion. knownTasks() overlays promote events and sets provisional=false.
+        //
+        // activeOnly:false — include RETIRED entries. Retiring is also append-only, and
+        // time can be bound to a Known Task retired after the fact. That time is still
+        // real, so a retired+provisional binding must still BLOCK the gate (filtering it
+        // out would let unreconciled time slip through). The base path used
+        // KnownTask.fetchOne, which ignored retire status, so activeOnly:false preserves
+        // that gate behavior while adding the promote overlay.
+        let overlaid = try knownTasks(activeOnly: false)
+        let byId = Dictionary(uniqueKeysWithValues: overlaid.compactMap { k -> (Int64, KnownTask)? in
+            guard let id = k.id else { return nil }
+            return (id, k)
+        })
+        var out: [KnownTask] = []
+        for (ktid, secs) in perKnown where secs > 0 {
+            if let k = byId[ktid], k.provisional {
+                out.append(k)
             }
-            return out
         }
+        return out
     }
 
     public struct ReconciledRow {
@@ -911,13 +925,26 @@ public final class Store {
 
         let binds = try bindings()
         let perTask = try windowSeconds(from: from, to: to)
+        // Use overlay-applied knownTasks() so promoted entries resolve to their real
+        // JIRA key. KnownTask.fetchOne on the base row always returns the provisional
+        // jiraKey (nil) because promoteKnownTask() writes an event, not a row mutation.
+        //
+        // activeOnly:false — include RETIRED entries so historical time bound to a
+        // since-retired Known Task is still reported, not silently dropped. The gate
+        // (above) guarantees any such entry is already non-provisional, so it resolves
+        // to a real key here.
+        let overlaid = try knownTasks(activeOnly: false)
+        let knownById = Dictionary(uniqueKeysWithValues: overlaid.compactMap { k -> (Int64, KnownTask)? in
+            guard let id = k.id else { return nil }
+            return (id, k)
+        })
         return try dbQueue.read { db in
             var byKey: [String: Int] = [:]
             for (tid, secs) in perTask where secs > 0 {
                 guard let t = try Task.fetchOne(db, key: tid),
                       t.category != "break",
                       let ktid = binds[tid],
-                      let k = try KnownTask.fetchOne(db, key: ktid),
+                      let k = knownById[ktid],
                       let key = k.jiraKey   // guaranteed non-nil: gate passed
                 else { continue }
                 byKey[key, default: 0] += secs

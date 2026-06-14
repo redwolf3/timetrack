@@ -686,11 +686,21 @@ final class CLIBindFlowTests: XCTestCase {
         captureTask = try store.upsertTask(captureTask)
         let captureId = try XCTUnwrap(captureTask.id)
 
-        // Seed exactly 3600 seconds (1 hour) of time within today's window.
-        // Use today's start + 1 hour offset so the interval falls inside the report window.
-        let today = Calendar.current.startOfDay(for: Date())
-        let dayStartMs = Int64(today.timeIntervalSince1970 * 1_000)
-        // Start at today + 1 hour, stop at today + 2 hours (exactly 3600 seconds).
+        // Seed exactly 3600 seconds (1 hour) on a FIXED PAST day.
+        // Why a past day, not today: the `bind` CLI call below appends a
+        // reconcile_bind event at real wall-clock now. If that now falls INSIDE
+        // the tracked interval (i.e. the test runs between the interval's start
+        // and stop hour-of-day), the event splits the interval, and report()'s
+        // per-segment Int(ms/1000) truncation drops a sub-second from each piece —
+        // yielding 3599s instead of 3600s and a time-of-day-flaky failure. Pinning
+        // the interval three days in the past keeps the bind event (today) outside
+        // the report window, so the interval is never split. (The underlying
+        // per-segment rounding in report() is a separate, pre-existing concern.)
+        let day = Calendar.current.date(
+            byAdding: .day, value: -3,
+            to: Calendar.current.startOfDay(for: Date()))!
+        let dayStartMs = Int64(day.timeIntervalSince1970 * 1_000)
+        // Start at day + 1 hour, stop at day + 2 hours (exactly 3600 seconds).
         let startMs = dayStartMs + 3_600_000
         let stopMs  = dayStartMs + 7_200_000  // startMs + 3_600_000
 
@@ -729,12 +739,12 @@ final class CLIBindFlowTests: XCTestCase {
         XCTAssertTrue(bindOut.lines.contains(where: { $0.contains("PROJ-1") }),
                       "bind must show JIRA key, lines: \(bindOut.lines)")
 
-        // Run reconcile over today's window and verify the output.
+        // Run reconcile over the fixed past-day window and verify the output.
         // formatDate is private in CLI.swift; replicate its format inline.
         let df = DateFormatter()
         df.dateFormat = "yyyy-MM-dd"
-        let todayStr = df.string(from: today)
-        let recOut = try runCLI(["reconcile", "--from", todayStr, "--to", todayStr], dataDir: dir)
+        let dayStr = df.string(from: day)
+        let recOut = try runCLI(["reconcile", "--from", dayStr, "--to", dayStr], dataDir: dir)
 
         // Must show a reconciled report header, not the "Unreconciled" or "Nothing reportable" path.
         XCTAssertTrue(recOut.lines.contains(where: { $0.contains("Reconciled report") }),
