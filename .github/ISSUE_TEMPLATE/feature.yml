@@ -1,0 +1,57 @@
+name: Feature request
+description: Propose new behavior or an enhancement for TimeTrack
+title: "[Feature]: "
+labels: ["type:feature"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The **Acceptance Criteria** section is the contract the coding agent implements
+        against — keep it concrete and testable.
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Problem / motivation
+      description: What problem does this solve? Who hits it, and when?
+    validations:
+      required: true
+  - type: textarea
+    id: proposed-behavior
+    attributes:
+      label: Proposed behavior
+      description: Describe the desired behavior from the user's perspective.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope (in / out)
+      description: What is explicitly in scope, and what is out of scope for this issue.
+      placeholder: |
+        In scope:
+        - ...
+        Out of scope:
+        - ...
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: "✅ Acceptance Criteria"
+      description: >-
+        The definition of done — concrete, testable conditions. This is the contract
+        the implementing agent works against.
+      placeholder: |
+        - [ ] ...
+        - [ ] Tests cover the new behavior
+    validations:
+      required: true
+  - type: textarea
+    id: implementer-notes
+    attributes:
+      label: Notes for implementer
+      description: >-
+        Design constraints, relevant DESIGN.md / CLAUDE.md sections, files likely to
+        change, gotchas (e.g. append-only event log, reconcile gate, idle segmentation).
+    validations:
+      required: false

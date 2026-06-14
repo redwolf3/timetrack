@@ -1,0 +1,20 @@
+name: Project automation
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+
+jobs:
+  add-to-project:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add newly-opened issues to the board
+        uses: actions/add-to-project@v1.0.2
+        with:
+          project-url: https://github.com/users/redwolf3/projects/1
+          # A classic PAT (or fine-grained token) with project + repo scope,
+          # stored as a repo secret named ADD_TO_PROJECT_PAT.
+          github-token: ${{ secrets.ADD_TO_PROJECT_PAT }}
