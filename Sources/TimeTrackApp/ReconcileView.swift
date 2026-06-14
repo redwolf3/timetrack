@@ -100,8 +100,10 @@ private struct UnboundRowView: View {
                     Text("— select —").tag(Optional<Int64>.none)
                     ForEach(appState.reconcileKnownTasks, id: \.id) { kt in
                         // Provisional entries have no jiraKey; show description instead.
+                        // kt.id is already Int64?, matching the picker's selection type —
+                        // tag it directly (no force-unwrap, which could crash on a nil id).
                         Text(kt.jiraKey ?? kt.description)
-                            .tag(Optional(kt.id!))
+                            .tag(kt.id)
                     }
                 }
                 .pickerStyle(.menu)

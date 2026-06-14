@@ -154,6 +154,72 @@ final class ReconcileGateTests: XCTestCase {
                       "reconciledReport must resolve the promoted key JIRA-9")
     }
 
+    // Retiring a Known Task must NOT be a backdoor past the gate. If provisional
+    // time is bound to an entry that is later retired, that time is still real and
+    // unreconciled — it must still appear in provisionalWithTime and still block
+    // reconciledReport. (Regression guard: resolving the overlay with
+    // activeOnly:true would drop retired entries and let the time slip through.)
+    func testRetiredProvisionalKnownTaskStillBlocksGate() throws {
+        let dir = try makeTmpDir()
+        let store = try Store(url: dir.appendingPathComponent("test.db"))
+
+        var task = Task(id: nil, name: "WIP", code: nil, category: "project", archived: false)
+        task = try store.upsertTask(task)
+        let taskId = try XCTUnwrap(task.id)
+
+        let kt = try store.addKnownTask(jiraKey: nil, description: "Loose entry")  // provisional
+        let ktId = try XCTUnwrap(kt.id)
+        try store.bind(taskId: taskId, knownTaskId: ktId, comment: nil)
+
+        let cal = Calendar.current
+        let pastDay = cal.date(byAdding: .day, value: -3, to: cal.startOfDay(for: Date()))!
+        try appendOneHour(store: store, taskId: taskId, day: pastDay)
+        let (from, to) = (pastDay, pastDay)
+
+        // Retire the provisional entry AFTER time is bound to it.
+        XCTAssertTrue(try store.retireKnownTask(id: ktId))
+
+        XCTAssertTrue(try store.provisionalWithTime(from: from, to: to).contains { $0.id == ktId },
+                      "retired+provisional entry with bound time must still block the gate")
+        XCTAssertThrowsError(try store.reconciledReport(from: from, to: to)) { err in
+            guard case Store.ReconcileError.provisional = err else {
+                return XCTFail("expected .provisional, got \(err)")
+            }
+        }
+    }
+
+    // Conversely, historical time bound to a Known Task that was promoted and then
+    // retired must STILL be reported, not silently dropped. (Regression guard for
+    // the reconciledReport path: activeOnly:true would drop the retired entry and
+    // omit its time from the report entirely.)
+    func testRetiredPromotedKnownTaskStillReports() throws {
+        let dir = try makeTmpDir()
+        let store = try Store(url: dir.appendingPathComponent("test.db"))
+
+        var task = Task(id: nil, name: "Done work", code: nil, category: "project", archived: false)
+        task = try store.upsertTask(task)
+        let taskId = try XCTUnwrap(task.id)
+
+        let kt = try store.addKnownTask(jiraKey: nil, description: "Was loose")
+        let ktId = try XCTUnwrap(kt.id)
+        try store.bind(taskId: taskId, knownTaskId: ktId, comment: nil)
+
+        let cal = Calendar.current
+        let pastDay = cal.date(byAdding: .day, value: -3, to: cal.startOfDay(for: Date()))!
+        try appendOneHour(store: store, taskId: taskId, day: pastDay)
+        let (from, to) = (pastDay, pastDay)
+
+        // Promote (real key), then retire the entry.
+        XCTAssertTrue(try store.promoteKnownTask(id: ktId, jiraKey: "JIRA-7"))
+        XCTAssertTrue(try store.retireKnownTask(id: ktId))
+
+        // Gate clears (no longer provisional) and the time is reported under JIRA-7.
+        XCTAssertFalse(try store.provisionalWithTime(from: from, to: to).contains { $0.id == ktId })
+        let rows = try store.reconciledReport(from: from, to: to)
+        XCTAssertTrue(rows.contains { $0.jiraKey == "JIRA-7" },
+                      "time bound to a promoted-then-retired entry must still be reported")
+    }
+
     // Break task time is never reportable and must not block the gate.
     func testBreakTimeExcludedFromGate() throws {
         let dir = try makeTmpDir()

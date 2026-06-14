@@ -884,7 +884,14 @@ public final class Store {
         // that promote events are reflected: promoteKnownTask() is append-only and
         // never mutates the base row, so k.provisional on the raw row is always true
         // after promotion. knownTasks() overlays promote events and sets provisional=false.
-        let overlaid = try knownTasks(activeOnly: true)
+        //
+        // activeOnly:false — include RETIRED entries. Retiring is also append-only, and
+        // time can be bound to a Known Task retired after the fact. That time is still
+        // real, so a retired+provisional binding must still BLOCK the gate (filtering it
+        // out would let unreconciled time slip through). The base path used
+        // KnownTask.fetchOne, which ignored retire status, so activeOnly:false preserves
+        // that gate behavior while adding the promote overlay.
+        let overlaid = try knownTasks(activeOnly: false)
         let byId = Dictionary(uniqueKeysWithValues: overlaid.compactMap { k -> (Int64, KnownTask)? in
             guard let id = k.id else { return nil }
             return (id, k)
@@ -921,7 +928,12 @@ public final class Store {
         // Use overlay-applied knownTasks() so promoted entries resolve to their real
         // JIRA key. KnownTask.fetchOne on the base row always returns the provisional
         // jiraKey (nil) because promoteKnownTask() writes an event, not a row mutation.
-        let overlaid = try knownTasks(activeOnly: true)
+        //
+        // activeOnly:false — include RETIRED entries so historical time bound to a
+        // since-retired Known Task is still reported, not silently dropped. The gate
+        // (above) guarantees any such entry is already non-provisional, so it resolves
+        // to a real key here.
+        let overlaid = try knownTasks(activeOnly: false)
         let knownById = Dictionary(uniqueKeysWithValues: overlaid.compactMap { k -> (Int64, KnownTask)? in
             guard let id = k.id else { return nil }
             return (id, k)

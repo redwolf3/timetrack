@@ -739,7 +739,7 @@ final class CLIBindFlowTests: XCTestCase {
         XCTAssertTrue(bindOut.lines.contains(where: { $0.contains("PROJ-1") }),
                       "bind must show JIRA key, lines: \(bindOut.lines)")
 
-        // Run reconcile over today's window and verify the output.
+        // Run reconcile over the fixed past-day window and verify the output.
         // formatDate is private in CLI.swift; replicate its format inline.
         let df = DateFormatter()
         df.dateFormat = "yyyy-MM-dd"
