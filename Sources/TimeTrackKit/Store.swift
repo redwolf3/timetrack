@@ -840,6 +840,153 @@ public final class Store {
             knownTaskId: knownTaskId, jiraKey: nil))
     }
 
+    // Per-day attributed slice timeline: same walk as report(day:) but produces
+    // raw (taskId, startMs, endMs) intervals instead of summing. Used by the
+    // normalisation pass to evaluate each contiguous interval independently.
+    //
+    // Algorithm:
+    //   1. Walk events in [dayStart, dayEnd) to build a sorted list of all
+    //      breakpoints (event timestamps + idle_resolve range boundaries).
+    //   2. For each minimal segment between consecutive breakpoints, determine
+    //      the walk-active task at the segment start.
+    //   3. Apply idle_resolve reattribution: each segment's midpoint is checked
+    //      against resolve ranges; a covering range overrides the attributed task.
+    //   4. Merge consecutive segments attributed to the same task.
+    //
+    // Accepted edge: an interval spanning midnight is split at the day boundary
+    // (consistent with the day-walk approach used by windowSeconds).
+    private func sliceTimeline(
+        day: Date,
+        db: Database
+    ) throws -> [(taskId: Int64, startMs: Int64, endMs: Int64)] {
+        let cal = Calendar.current
+        let dayStart = cal.startOfDay(for: day)
+        let dayEnd   = cal.date(byAdding: .day, value: 1, to: dayStart)!
+        let startMs  = Int64(dayStart.timeIntervalSince1970 * 1_000)
+        let endMs    = Int64(dayEnd.timeIntervalSince1970   * 1_000)
+        let nowMs    = Int64(Date().timeIntervalSince1970   * 1_000)
+        let closeTs  = min(endMs, nowMs)
+
+        guard closeTs > startMs else { return [] }
+
+        // Fetch prior event (to know what was active at midnight).
+        let prior = try Event
+            .filter(Column("ts") < startMs)
+            .order(Column("ts").desc, Column("id").desc)
+            .fetchOne(db)
+
+        // Fetch events within the day window.
+        let today = try Event
+            .filter(Column("ts") >= startMs && Column("ts") < endMs)
+            .order(Column("ts").asc, Column("id").asc)
+            .fetchAll(db)
+
+        // Idle-resolve events whose range intersects this day (for extra breakpoints).
+        let resolves = try Event
+            .filter(Column("type") == EventType.idleResolve.rawValue)
+            .filter(Column("rangeEnd") > startMs && Column("rangeStart") < endMs)
+            .fetchAll(db)
+
+        // --- Step 1: collect all breakpoint timestamps in [startMs, closeTs] ---
+        var breakpointSet: Set<Int64> = [startMs, closeTs]
+        for e in today where e.ts > startMs && e.ts < closeTs {
+            breakpointSet.insert(e.ts)
+        }
+        for r in resolves {
+            if let rs = r.rangeStart {
+                let crs = max(rs, startMs)
+                if crs < closeTs { breakpointSet.insert(crs) }
+            }
+            if let re = r.rangeEnd {
+                let cre = min(re, closeTs)
+                if cre > startMs { breakpointSet.insert(cre) }
+            }
+        }
+        let sortedBPs = breakpointSet.sorted()
+
+        // --- Step 2: determine walk-active task at each breakpoint -----------
+        // Walk the event stream, tracking active task state. For each breakpoint,
+        // record the active task BEFORE advancing events at that exact timestamp,
+        // then advance all events AT the breakpoint. This way:
+        //   - startMs → task from prior (active at midnight)
+        //   - a breakpoint equal to an event ts → the task AFTER that event
+        //     (since the event changes the active task AT that ts, and the
+        //      next segment starts after the event).
+        // We record the task that applies for the interval STARTING at this bp,
+        // which is the walk-active state AFTER processing events at this ts.
+        var walkActive: Int64? = activeTaskFromPrior(prior)
+        var activeAtBP: [Int64: Int64?] = [:]
+        var eIdx = 0
+
+        // startMs: advance events with ts == startMs (events exactly at day boundary
+        // affect what's active from startMs onward).
+        while eIdx < today.count && today[eIdx].ts <= startMs {
+            walkActive = nextActiveTask(after: today[eIdx], current: walkActive)
+            eIdx += 1
+        }
+        activeAtBP[startMs] = walkActive
+
+        for bp in sortedBPs.dropFirst() {  // remaining breakpoints after startMs
+            // Advance events with ts <= bp (they fire at this timestamp).
+            while eIdx < today.count && today[eIdx].ts <= bp {
+                walkActive = nextActiveTask(after: today[eIdx], current: walkActive)
+                eIdx += 1
+            }
+            activeAtBP[bp] = walkActive
+        }
+
+        // --- Step 3: build raw segments between consecutive breakpoints ------
+        var rawSegments: [(taskId: Int64?, startMs: Int64, endMs: Int64)] = []
+        for i in 0 ..< sortedBPs.count - 1 {
+            let segStart = sortedBPs[i]
+            let segEnd   = sortedBPs[i + 1]
+            guard segEnd > segStart else { continue }
+            rawSegments.append((taskId: activeAtBP[segStart] ?? nil,
+                                startMs: segStart, endMs: segEnd))
+        }
+
+        // --- Step 4: apply idle_resolve reattribution at segment granularity -
+        // Resolve ranges are derived from the same breakpoints, so each segment
+        // falls entirely inside or entirely outside any resolve range — the
+        // midpoint check is sufficient and avoids boundary ambiguity.
+        struct ResolveRange {
+            let rangeStart: Int64
+            let rangeEnd: Int64
+            let newTask: Int64?   // nil = discard
+        }
+        let resolveRanges: [ResolveRange] = resolves.compactMap { r in
+            guard let rs = r.rangeStart, let re = r.rangeEnd else { return nil }
+            let cs = max(rs, startMs)
+            let ce = min(re, closeTs)
+            guard ce > cs else { return nil }
+            return ResolveRange(rangeStart: cs, rangeEnd: ce, newTask: r.taskId)
+        }
+
+        let attributed: [(taskId: Int64?, startMs: Int64, endMs: Int64)] = rawSegments.map { seg in
+            let mid = seg.startMs + (seg.endMs - seg.startMs) / 2
+            for res in resolveRanges {
+                if mid >= res.rangeStart && mid < res.rangeEnd {
+                    return (taskId: res.newTask, startMs: seg.startMs, endMs: seg.endMs)
+                }
+            }
+            return seg
+        }
+
+        // --- Step 5: merge consecutive same-task segments --------------------
+        var merged: [(taskId: Int64, startMs: Int64, endMs: Int64)] = []
+        for seg in attributed {
+            guard let tid = seg.taskId else { continue }  // nil = no task, skip
+            if let last = merged.last, last.taskId == tid, last.endMs == seg.startMs {
+                merged[merged.count - 1] = (taskId: tid,
+                                            startMs: last.startMs,
+                                            endMs: seg.endMs)
+            } else {
+                merged.append((taskId: tid, startMs: seg.startMs, endMs: seg.endMs))
+            }
+        }
+        return merged
+    }
+
     private func windowSeconds(from: Date, to: Date) throws -> [Int64: Int] {
         var perTask: [Int64: Int] = [:]
         var day = Calendar.current.startOfDay(for: from)
@@ -917,14 +1064,61 @@ public final class Store {
         case provisional([KnownTask])
     }
 
-    public func reconciledReport(from: Date, to: Date) throws -> [ReconciledRow] {
+    // A JIRA key whose post-normalisation total falls below the rounding quantum.
+    // The UI queries subFifteenCandidates() to prompt the user for a resolution
+    // before calling reconciledReport with subFifteenResolutions populated.
+    public struct SubFifteenItem {
+        public let jiraKey: String
+        public let totalSeconds: Int
+    }
+
+    // How to handle a sub-quantum JIRA key in the final reconciled report.
+    // Unresolved keys (no entry in subFifteenResolutions) are reported as-is
+    // at their raw post-pass-1 seconds — no silent billing decision is made.
+    public enum SubFifteenResolution {
+        case recordAs15         // pad to exactly one quantum
+        case drop               // omit from report entirely
+        case rollIntoAggregate  // merge seconds into the aggregateKey bucket
+    }
+
+    public func reconciledReport(
+        from: Date,
+        to: Date,
+        dropBelowSec: Int = 0,
+        minIntervalMin: Int = 0,
+        roundToMin: Int = 0,
+        aggregateKey: String? = nil,
+        subFifteenResolutions: [String: SubFifteenResolution] = [:]
+    ) throws -> [ReconciledRow] {
+        // Gate: run BEFORE normalisation. Both conditions must clear.
+        // unreconciled() and provisionalWithTime() use windowSeconds (raw totals),
+        // intentionally unaffected by normalisation parameters.
         let unbound = try unreconciled(from: from, to: to)
         guard unbound.isEmpty else { throw ReconcileError.unbound(unbound) }
         let provisional = try provisionalWithTime(from: from, to: to)
         guard provisional.isEmpty else { throw ReconcileError.provisional(provisional) }
 
+        // Pass 1: per-interval drop/floor, derived from sliceTimeline.
+        // Uses the same day-walk as report(day:) to get contiguous attributed intervals.
+        // With dropBelowSec==0 and minIntervalMin==0 the result equals windowSeconds totals.
+        let perTask: [Int64: Int] = try dbQueue.read { db in
+            var totals: [Int64: Int] = [:]
+            var day = Calendar.current.startOfDay(for: from)
+            let dayEnd = Calendar.current.startOfDay(for: to)
+            while day <= dayEnd {
+                let slices = try sliceTimeline(day: day, db: db)
+                for slice in slices {
+                    let d = Int((slice.endMs - slice.startMs) / 1_000)
+                    if dropBelowSec > 0 && d < dropBelowSec { continue }  // drop interval
+                    let credit = max(d, minIntervalMin * 60)               // floor to minimum
+                    totals[slice.taskId, default: 0] += credit
+                }
+                day = Calendar.current.date(byAdding: .day, value: 1, to: day)!
+            }
+            return totals
+        }
+
         let binds = try bindings()
-        let perTask = try windowSeconds(from: from, to: to)
         // Use overlay-applied knownTasks() so promoted entries resolve to their real
         // JIRA key. KnownTask.fetchOne on the base row always returns the provisional
         // jiraKey (nil) because promoteKnownTask() writes an event, not a row mutation.
@@ -938,8 +1132,10 @@ public final class Store {
             guard let id = k.id else { return nil }
             return (id, k)
         })
-        return try dbQueue.read { db in
-            var byKey: [String: Int] = [:]
+
+        // Roll per-task normalised seconds into per-JIRA-key buckets.
+        var byKey: [String: Int] = [:]
+        try dbQueue.read { db in
             for (tid, secs) in perTask where secs > 0 {
                 guard let t = try Task.fetchOne(db, key: tid),
                       t.category != "break",
@@ -949,9 +1145,133 @@ public final class Store {
                 else { continue }
                 byKey[key, default: 0] += secs
             }
-            return byKey.map { ReconciledRow(jiraKey: $0.key, totalSeconds: $0.value) }
-                .sorted { $0.totalSeconds > $1.totalSeconds }
         }
+
+        // Pass 2 + Pass 3: rounding and sub-quantum resolution.
+        // The aggregate key is excluded from pass-2 rounding and handled exactly
+        // once in pass-3, seeded from its RAW (post-pass-1) total. This avoids
+        // double-rounding when the aggregate key also has directly-tracked time:
+        // old code rounded byKey[aggregateKey] in pass-2, then seeded aggregateBucket
+        // from that already-rounded value and added raw roll-in seconds → a mix of
+        // rounded base + raw additions that could overbill.
+        let quantum = roundToMin * 60
+        if quantum > 0 {
+            let aggKeyName = aggregateKey
+            // Seed from the RAW (post-pass-1) aggregate total BEFORE any rounding,
+            // so rolled-in sub-quantum seconds sum with raw seconds and round exactly once.
+            var aggregateBucket = aggKeyName.flatMap { byKey[$0] } ?? 0
+
+            // Pass 2: round every key UP to the next quantum — except the aggregate key,
+            // which pass 3 owns and rounds once after accumulating roll-ins.
+            var rounded: [String: Int] = [:]
+            for (key, total) in byKey {
+                if key == aggKeyName { continue }           // deferred to pass 3
+                if total >= quantum {
+                    rounded[key] = ((total + quantum - 1) / quantum) * quantum
+                } else {
+                    rounded[key] = total                    // sub-quantum: pass 3 handles it
+                }
+            }
+            byKey = rounded
+
+            // Pass 3: sub-quantum resolution. Unresolved sub-quantum keys are reported
+            // as-is (no silent billing decision).
+            var keysToRemove: [String] = []
+            for (key, total) in byKey where total > 0 && total < quantum {
+                switch subFifteenResolutions[key] {
+                case .recordAs15:
+                    byKey[key] = quantum
+                case .drop:
+                    keysToRemove.append(key)
+                case .rollIntoAggregate:
+                    if aggKeyName != nil {
+                        aggregateBucket += total
+                        keysToRemove.append(key)
+                    } else {
+                        keysToRemove.append(key)            // nil aggregateKey → treat as drop, don't crash
+                    }
+                case nil:
+                    break                                   // unresolved → report as-is
+                }
+            }
+            for k in keysToRemove { byKey.removeValue(forKey: k) }
+
+            // Aggregate bucket: always recorded, never re-prompted; rounded exactly once.
+            if let ak = aggKeyName, aggregateBucket > 0 {
+                byKey[ak] = ((aggregateBucket + quantum - 1) / quantum) * quantum
+            }
+        }
+
+        return byKey.map { ReconciledRow(jiraKey: $0.key, totalSeconds: $0.value) }
+            .sorted { $0.totalSeconds > $1.totalSeconds }
+    }
+
+    // Returns JIRA keys whose post-pass-1 normalised total falls in (0, quantum)
+    // after rolling up per task. Returns empty if roundToMin == 0 (no quantum).
+    // Runs the same reconcile gate as reconciledReport — throws ReconcileError
+    // if the gate fails, so the UI can rely on gate state before prompting.
+    //
+    // Intended workflow: call subFifteenCandidates first, prompt the user for
+    // a SubFifteenResolution per returned key, then call reconciledReport with
+    // subFifteenResolutions populated.
+    public func subFifteenCandidates(
+        from: Date,
+        to: Date,
+        dropBelowSec: Int = 0,
+        minIntervalMin: Int = 0,
+        roundToMin: Int
+    ) throws -> [SubFifteenItem] {
+        // Gate must clear first (same conditions as reconciledReport).
+        let unbound = try unreconciled(from: from, to: to)
+        guard unbound.isEmpty else { throw ReconcileError.unbound(unbound) }
+        let provisional = try provisionalWithTime(from: from, to: to)
+        guard provisional.isEmpty else { throw ReconcileError.provisional(provisional) }
+
+        let quantum = roundToMin * 60
+        guard quantum > 0 else { return [] }
+
+        // Pass 1: same as reconciledReport.
+        let perTask: [Int64: Int] = try dbQueue.read { db in
+            var totals: [Int64: Int] = [:]
+            var day = Calendar.current.startOfDay(for: from)
+            let dayEnd = Calendar.current.startOfDay(for: to)
+            while day <= dayEnd {
+                let slices = try sliceTimeline(day: day, db: db)
+                for slice in slices {
+                    let d = Int((slice.endMs - slice.startMs) / 1_000)
+                    if dropBelowSec > 0 && d < dropBelowSec { continue }
+                    let credit = max(d, minIntervalMin * 60)
+                    totals[slice.taskId, default: 0] += credit
+                }
+                day = Calendar.current.date(byAdding: .day, value: 1, to: day)!
+            }
+            return totals
+        }
+
+        let binds = try bindings()
+        let overlaid = try knownTasks(activeOnly: false)
+        let knownById = Dictionary(uniqueKeysWithValues: overlaid.compactMap { k -> (Int64, KnownTask)? in
+            guard let id = k.id else { return nil }
+            return (id, k)
+        })
+
+        var byKey: [String: Int] = [:]
+        try dbQueue.read { db in
+            for (tid, secs) in perTask where secs > 0 {
+                guard let t = try Task.fetchOne(db, key: tid),
+                      t.category != "break",
+                      let ktid = binds[tid],
+                      let k = knownById[ktid],
+                      let key = k.jiraKey
+                else { continue }
+                byKey[key, default: 0] += secs
+            }
+        }
+
+        return byKey.compactMap { key, total in
+            guard total > 0 && total < quantum else { return nil }
+            return SubFifteenItem(jiraKey: key, totalSeconds: total)
+        }.sorted { $0.totalSeconds > $1.totalSeconds }
     }
 
     // MARK: - Current status (for CLI)
