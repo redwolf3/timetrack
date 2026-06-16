@@ -441,16 +441,11 @@ final class AppState: ObservableObject {
         reconcileIsClean     = reconcileUnbound.isEmpty && reconcileProvisional.isEmpty
 
         if reconcileIsClean {
-            // Fresh candidate list: resolutions were just reset above, so every
-            // candidate starts unresolved here. (Per-row shrinking as the user
-            // decides happens in setSubFifteenResolution, not on refresh.)
-            reconcileSubFifteen = (try? store.subFifteenCandidates(
-                from: w.from, to: w.to,
-                dropBelowSec: NormConst.dropBelowSec,
-                minIntervalMin: NormConst.minIntervalMin,
-                roundToMin: NormConst.roundToMin)) ?? []
-
-            // Recompute the finalised report given all current resolutions.
+            // Compute the finalised report once. Resolutions were just reset above,
+            // so every sub-quantum key is unresolved and therefore appears UNROUNDED
+            // (< quantum) in the rows; the prompt list is derived from those rows,
+            // avoiding a second full event-walk pass. reconciledReport rounds the
+            // aggregate bucket up to the quantum, so it never shows up as a sub-15 row.
             reconcileReportRows = (try? store.reconciledReport(
                 from: w.from, to: w.to,
                 dropBelowSec: NormConst.dropBelowSec,
@@ -458,6 +453,11 @@ final class AppState: ObservableObject {
                 roundToMin: NormConst.roundToMin,
                 aggregateKey: Self.aggregateKey,
                 subFifteenResolutions: subFifteenResolutions)) ?? []
+
+            let quantum = NormConst.roundToMin * 60
+            reconcileSubFifteen = reconcileReportRows
+                .filter { $0.jiraKey != Self.aggregateKey && $0.totalSeconds < quantum }
+                .map { Store.SubFifteenItem(jiraKey: $0.jiraKey, totalSeconds: $0.totalSeconds) }
         } else {
             // Gates not clear — sub-15 data would be invalid (kit throws on gate failure).
             reconcileSubFifteen = []

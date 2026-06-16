@@ -1069,6 +1069,13 @@ public final class Store {
     public struct SubFifteenItem {
         public let jiraKey: String
         public let totalSeconds: Int
+
+        // Public so the app can derive candidates from a reconciledReport pass
+        // (the synthesised memberwise init is internal and not visible cross-module).
+        public init(jiraKey: String, totalSeconds: Int) {
+            self.jiraKey = jiraKey
+            self.totalSeconds = totalSeconds
+        }
     }
 
     // How to handle a sub-quantum JIRA key in the final reconciled report.
@@ -1190,9 +1197,10 @@ public final class Store {
                     if aggKeyName != nil {
                         aggregateBucket += total
                         keysToRemove.append(key)
-                    } else {
-                        keysToRemove.append(key)            // nil aggregateKey → treat as drop, don't crash
                     }
+                    // else: no aggregate bucket configured → leave the key as-is
+                    // (reported raw). Dropping it would be a silent billing decision,
+                    // which this layer never makes — consistent with the `nil` case.
                 case nil:
                     break                                   // unresolved → report as-is
                 }
@@ -1217,12 +1225,17 @@ public final class Store {
     // Intended workflow: call subFifteenCandidates first, prompt the user for
     // a SubFifteenResolution per returned key, then call reconciledReport with
     // subFifteenResolutions populated.
+    //
+    // Pass the same `aggregateKey` you will pass to reconciledReport: the aggregate
+    // bucket is auto-rounded/recorded there and is never prompted, so it must not
+    // appear as a candidate here either.
     public func subFifteenCandidates(
         from: Date,
         to: Date,
         dropBelowSec: Int = 0,
         minIntervalMin: Int = 0,
-        roundToMin: Int
+        roundToMin: Int,
+        aggregateKey: String? = nil
     ) throws -> [SubFifteenItem] {
         // Gate must clear first (same conditions as reconciledReport).
         let unbound = try unreconciled(from: from, to: to)
@@ -1272,7 +1285,8 @@ public final class Store {
         }
 
         return byKey.compactMap { key, total in
-            guard total > 0 && total < quantum else { return nil }
+            // The aggregate bucket is auto-handled by reconciledReport — never prompt for it.
+            guard key != aggregateKey, total > 0, total < quantum else { return nil }
             return SubFifteenItem(jiraKey: key, totalSeconds: total)
         }.sorted { $0.totalSeconds > $1.totalSeconds }
     }

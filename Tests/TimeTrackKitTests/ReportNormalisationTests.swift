@@ -384,6 +384,49 @@ final class ReportNormalisationTests: XCTestCase {
         XCTAssertEqual(dayTotalB, 60,  "report(day:) B should have 60s after idle_resolve")
     }
 
+    // MARK: - rollIntoAggregate with no aggregateKey reports as-is (no silent drop)
+
+    // When a key is resolved to .rollIntoAggregate but no aggregateKey is configured,
+    // the time must be reported as-is, never silently dropped (matches the unresolved
+    // case — this layer makes no silent billing decision).
+    func testRollIntoAggregateWithoutAggregateKeyReportsAsIs() throws {
+        let store = try makeStore()
+        let (taskId, _) = try makeTaskBound(store, name: "NoAgg", jiraKey: "NOAGG-1")
+        let base = baseMs(pastDay) + 9 * 3_600_000
+        try appendBlock(store, taskId: taskId, startMs: base, durationSec: 720)
+
+        let rows = try store.reconciledReport(
+            from: pastDay, to: pastDay,
+            dropBelowSec: 0, minIntervalMin: 0, roundToMin: 15,
+            aggregateKey: nil,
+            subFifteenResolutions: ["NOAGG-1": .rollIntoAggregate])
+
+        let row = try XCTUnwrap(rows.first(where: { $0.jiraKey == "NOAGG-1" }),
+            "rollIntoAggregate with nil aggregateKey must not drop the key")
+        XCTAssertEqual(row.totalSeconds, 720, "Reported as-is when no aggregate bucket is configured")
+    }
+
+    // MARK: - subFifteenCandidates excludes the configured aggregate key
+
+    // The aggregate bucket is auto-rounded/recorded by reconciledReport and is never
+    // prompted, so it must not be returned as a candidate when aggregateKey is passed.
+    func testSubFifteenCandidatesExcludesAggregateKey() throws {
+        let store = try makeStore()
+        let (tiny, _) = try makeTaskBound(store, name: "Tiny", jiraKey: "TINY-1")
+        let (misc, _) = try makeTaskBound(store, name: "Misc", jiraKey: "MISC")
+        let base = baseMs(pastDay) + 9 * 3_600_000
+        try appendBlock(store, taskId: tiny, startMs: base, durationSec: 720)            // 12m, sub-15
+        try appendBlock(store, taskId: misc, startMs: base + 800_000, durationSec: 300)  // 5m, sub-15
+
+        let candidates = try store.subFifteenCandidates(
+            from: pastDay, to: pastDay,
+            dropBelowSec: 0, minIntervalMin: 0, roundToMin: 15,
+            aggregateKey: "MISC")
+
+        XCTAssertEqual(candidates.map { $0.jiraKey }, ["TINY-1"],
+            "Aggregate key MISC must be excluded from sub-15 candidates")
+    }
+
     // MARK: - Test 10: Gate still throws with normalisation params set
 
     func testGateThrowsUnboundWithNormalisationParams() throws {
