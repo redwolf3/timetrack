@@ -441,14 +441,14 @@ final class AppState: ObservableObject {
         reconcileIsClean     = reconcileUnbound.isEmpty && reconcileProvisional.isEmpty
 
         if reconcileIsClean {
-            // Recompute sub-15 candidates, filtering out keys the user has already resolved.
-            let allCandidates = (try? store.subFifteenCandidates(
+            // Fresh candidate list: resolutions were just reset above, so every
+            // candidate starts unresolved here. (Per-row shrinking as the user
+            // decides happens in setSubFifteenResolution, not on refresh.)
+            reconcileSubFifteen = (try? store.subFifteenCandidates(
                 from: w.from, to: w.to,
                 dropBelowSec: NormConst.dropBelowSec,
                 minIntervalMin: NormConst.minIntervalMin,
                 roundToMin: NormConst.roundToMin)) ?? []
-            // Remove candidates that already have a resolution — prompt list shrinks as user decides.
-            reconcileSubFifteen = allCandidates.filter { subFifteenResolutions[$0.jiraKey] == nil }
 
             // Recompute the finalised report given all current resolutions.
             reconcileReportRows = (try? store.reconciledReport(

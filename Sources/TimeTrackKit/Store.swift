@@ -906,14 +906,13 @@ public final class Store {
 
         // --- Step 2: determine walk-active task at each breakpoint -----------
         // Walk the event stream, tracking active task state. For each breakpoint,
-        // record the active task BEFORE advancing events at that exact timestamp,
-        // then advance all events AT the breakpoint. This way:
+        // advance all events AT that timestamp first, then record the resulting
+        // active task — i.e. the walk-active state AFTER processing events at
+        // this ts. This is what applies to the interval STARTING at this bp:
         //   - startMs → task from prior (active at midnight)
         //   - a breakpoint equal to an event ts → the task AFTER that event
-        //     (since the event changes the active task AT that ts, and the
-        //      next segment starts after the event).
-        // We record the task that applies for the interval STARTING at this bp,
-        // which is the walk-active state AFTER processing events at this ts.
+        //     (the event changes the active task AT that ts, and the next
+        //      segment starts after the event).
         var walkActive: Int64? = activeTaskFromPrior(prior)
         var activeAtBP: [Int64: Int64?] = [:]
         var eIdx = 0
@@ -1176,8 +1175,12 @@ public final class Store {
 
             // Pass 3: sub-quantum resolution. Unresolved sub-quantum keys are reported
             // as-is (no silent billing decision).
+            // Snapshot the sub-quantum keys before the loop so we never read and
+            // mutate byKey simultaneously (clearer than relying on Dictionary's
+            // copy-on-write snapshot-iteration semantics).
+            let subQuantum = byKey.filter { $0.value > 0 && $0.value < quantum }
             var keysToRemove: [String] = []
-            for (key, total) in byKey where total > 0 && total < quantum {
+            for (key, total) in subQuantum {
                 switch subFifteenResolutions[key] {
                 case .recordAs15:
                     byKey[key] = quantum
