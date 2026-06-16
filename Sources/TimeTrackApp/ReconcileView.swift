@@ -37,12 +37,43 @@ struct ReconcileView: View {
 
                 // Clean state: both gates clear.
                 if appState.reconcileIsClean {
-                    Text("All time reconciled")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
+
+                    // Sub-15-min prompt: only shown while unresolved candidates remain.
+                    // As the user picks a resolution, each row disappears (AppState
+                    // filters resolved keys out of reconcileSubFifteen).
+                    if !appState.reconcileSubFifteen.isEmpty {
+                        sectionHeader("Sub-15-min Tasks")
+                        ForEach(appState.reconcileSubFifteen, id: \.jiraKey) { item in
+                            SubFifteenRowView(item: item, aggregateKey: appState.aggregateKey)
+                        }
+                    }
+
+                    // Report preview: always shown when both gates are clear.
+                    // Shows finalised normalised totals given current resolutions.
+                    if !appState.reconcileReportRows.isEmpty {
+                        sectionHeader("Reconciled Report")
+                        ForEach(appState.reconcileReportRows, id: \.jiraKey) { row in
+                            HStack {
+                                Text(row.jiraKey)
+                                    .font(.caption)
+                                    .foregroundStyle(.primary)
+                                Spacer()
+                                Text(appState.formatDuration(row.totalSeconds))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 2)
+                        }
+                    } else if appState.reconcileReportRows.isEmpty && appState.reconcileSubFifteen.isEmpty {
+                        // Empty report and no candidates: clean slate (no tracked time in window).
+                        Text("All time reconciled")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                    }
                 }
             }
         }
@@ -165,6 +196,58 @@ private struct ProvisionalRowView: View {
         // (guard triggers in AppState on whitespace), the field retains the bad
         // input so the user can correct it. On a valid promote, refreshReconcile
         // removes this row entirely, so the field reset is moot.
+    }
+}
+
+// MARK: - SubFifteenRowView
+
+// One row per sub-15-minute JIRA key needing a resolution.
+// @State var selection is per-row, isolated in this subview (same reason as UnboundRowView).
+// The segmented Picker fires setSubFifteenResolution on change; the row then disappears
+// as AppState filters resolved keys out of reconcileSubFifteen.
+private struct SubFifteenRowView: View {
+    @EnvironmentObject var appState: AppState
+    let item: Store.SubFifteenItem
+    let aggregateKey: String
+
+    // nil = no selection yet (show placeholder label in segmented control)
+    @State private var selection: Store.SubFifteenResolution? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(item.jiraKey)
+                    .font(.caption)
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer()
+                Text(appState.formatDuration(item.totalSeconds))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            // Segmented picker: three options covering every resolution case.
+            // "Roll into MISC" label surfaces the aggregateKey so the user knows
+            // exactly where the time goes — it's not a black box.
+            Picker("Resolution", selection: Binding(
+                get: { selection },
+                set: { newVal in
+                    selection = newVal
+                    if let res = newVal {
+                        appState.setSubFifteenResolution(jiraKey: item.jiraKey, res)
+                    }
+                }
+            )) {
+                Text("Record 15m").tag(Optional(Store.SubFifteenResolution.recordAs15))
+                Text("Drop").tag(Optional(Store.SubFifteenResolution.drop))
+                Text("Roll into \(aggregateKey)").tag(Optional(Store.SubFifteenResolution.rollIntoAggregate))
+            }
+            .pickerStyle(.segmented)
+            .controlSize(.small)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 3)
     }
 }
 #endif

@@ -379,6 +379,20 @@ final class AppState: ObservableObject {
 
     // MARK: - Reconcile (in-app reconcile UI)
 
+    // MARK: - Report normalisation constants (DESIGN.md §"Report-layer time normalisation")
+    // These are report-time parameters only — never baked into stored events.
+    private enum NormConst {
+        static let dropBelowSec  = 30   // intervals shorter than 30s are noise; drop
+        static let minIntervalMin = 1   // floor surviving intervals to 1 minute
+        static let roundToMin    = 15   // round per-key totals up to the next 15-min quantum
+    }
+
+    // Catch-all bucket for sub-quantum time rolled up via .rollIntoAggregate.
+    // TODO(#30): make configurable; placeholder catch-all bucket
+    private static let aggregateKey = "MISC"
+    // Read-only accessor so views can display the key label without duplicating the literal.
+    var aggregateKey: String { Self.aggregateKey }
+
     // Snapshots refreshed lazily when the reconcile panel opens. Views read these
     // directly — no store calls in body. All gate logic lives in AppState; the
     // view only renders and calls action methods.
@@ -388,6 +402,17 @@ final class AppState: ObservableObject {
     // True when both gates are clear after a refresh — the view reads this flag;
     // it never recomputes it. Avoids putting gate logic (&&) in the view.
     @Published private(set) var reconcileIsClean: Bool = false
+
+    // Sub-15-minute candidates: JIRA keys whose post-pass-1 total < 15 min quantum.
+    // Non-empty only when reconcileIsClean is true. Shrinks as user resolves rows.
+    @Published private(set) var reconcileSubFifteen: [Store.SubFifteenItem] = []
+
+    // User's resolution choices, keyed by jiraKey. Populated by setSubFifteenResolution.
+    @Published private(set) var subFifteenResolutions: [String: Store.SubFifteenResolution] = [:]
+
+    // Finalised normalised report preview given current resolutions.
+    // Recomputed whenever resolutions change or reconcile refreshes.
+    @Published private(set) var reconcileReportRows: [Store.ReconciledRow] = []
 
     // Trailing 14 calendar days: today (startOfDay) minus 13 days to today.
     // Rationale: CLI default ("today only") is too narrow for users who haven't
@@ -406,11 +431,38 @@ final class AppState: ObservableObject {
     // refreshHistory's pattern. Errors swallow to empty arrays; if the store
     // throws the user sees an empty/clean panel which is a safe failure mode.
     func refreshReconcile() {
+        // Sub-15 resolutions are per-session: a stale choice must never silently apply
+        // to a later session (DESIGN.md — no silent billing decision). Reset on each refresh.
+        subFifteenResolutions = [:]
         let w = reconcileWindow
         reconcileUnbound    = (try? store.unreconciled(from: w.from, to: w.to)) ?? []
         reconcileProvisional = (try? store.provisionalWithTime(from: w.from, to: w.to)) ?? []
         reconcileKnownTasks  = (try? store.knownTasks(activeOnly: true)) ?? []
         reconcileIsClean     = reconcileUnbound.isEmpty && reconcileProvisional.isEmpty
+
+        if reconcileIsClean {
+            // Compute the finalised report once. Resolutions were just reset above,
+            // so every sub-quantum key is unresolved and therefore appears UNROUNDED
+            // (< quantum) in the rows; the prompt list is derived from those rows,
+            // avoiding a second full event-walk pass. reconciledReport rounds the
+            // aggregate bucket up to the quantum, so it never shows up as a sub-15 row.
+            reconcileReportRows = (try? store.reconciledReport(
+                from: w.from, to: w.to,
+                dropBelowSec: NormConst.dropBelowSec,
+                minIntervalMin: NormConst.minIntervalMin,
+                roundToMin: NormConst.roundToMin,
+                aggregateKey: Self.aggregateKey,
+                subFifteenResolutions: subFifteenResolutions)) ?? []
+
+            let quantum = NormConst.roundToMin * 60
+            reconcileSubFifteen = reconcileReportRows
+                .filter { $0.jiraKey != Self.aggregateKey && $0.totalSeconds < quantum }
+                .map { Store.SubFifteenItem(jiraKey: $0.jiraKey, totalSeconds: $0.totalSeconds) }
+        } else {
+            // Gates not clear — sub-15 data would be invalid (kit throws on gate failure).
+            reconcileSubFifteen = []
+            reconcileReportRows = []
+        }
     }
 
     // Binds an ad-hoc capture task to a Known Task registry entry.
@@ -431,6 +483,24 @@ final class AppState: ObservableObject {
         guard !trimmed.isEmpty else { return }
         try? store.promoteKnownTask(id: id, jiraKey: trimmed)
         refreshReconcile()
+    }
+
+    // Records the user's sub-15-minute resolution for a single JIRA key, then
+    // recomputes the report preview. Removing the key from the candidate list
+    // collapses the prompt row immediately (UX matches reconcileBind shrink).
+    func setSubFifteenResolution(jiraKey: String, _ resolution: Store.SubFifteenResolution) {
+        subFifteenResolutions[jiraKey] = resolution
+        // Shrink the prompt list: resolved keys no longer need a decision.
+        reconcileSubFifteen = reconcileSubFifteen.filter { $0.jiraKey != jiraKey }
+        // Recompute the report preview with updated resolutions.
+        let w = reconcileWindow
+        reconcileReportRows = (try? store.reconciledReport(
+            from: w.from, to: w.to,
+            dropBelowSec: NormConst.dropBelowSec,
+            minIntervalMin: NormConst.minIntervalMin,
+            roundToMin: NormConst.roundToMin,
+            aggregateKey: Self.aggregateKey,
+            subFifteenResolutions: subFifteenResolutions)) ?? []
     }
 
     // Cached formatter for the dated fallback label. DateFormatter construction
