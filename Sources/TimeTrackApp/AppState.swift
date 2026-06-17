@@ -55,7 +55,7 @@ final class AppState: ObservableObject {
     private let store: Store
     private let tracker: Tracker
 
-    // App-support data directory (single source from App.dataDirectory()).
+    // App-support data directory (single source: dataDirectory() in App.swift).
     // Held so the Config menu actions can reveal it / open the YAML files
     // without re-deriving the path — invariant: no path duplicated (#18).
     private let dataDir: URL
@@ -586,16 +586,17 @@ final class AppState: ObservableObject {
         openYAML(named: "tasks.yaml")
     }
 
-    // Opens a YAML file in the data dir with the default editor. If the file is
-    // not present (tasks.yaml is optional; profiles.yaml may not exist on first
-    // run), fall back to revealing the folder so the action never silently fails.
+    // Opens a YAML file in the data dir with the default editor. Falls back to
+    // revealing the folder when the file is absent (tasks.yaml is optional;
+    // profiles.yaml may not exist on first run) OR when the OS has no handler and
+    // open(_:) returns false — the action must never silently fail (#18).
     private func openYAML(named filename: String) {
         let url = dataDir.appendingPathComponent(filename)
-        if FileManager.default.fileExists(atPath: url.path) {
-            NSWorkspace.shared.open(url)
-        } else {
-            revealConfigFolder()
+        if FileManager.default.fileExists(atPath: url.path),
+           NSWorkspace.shared.open(url) {
+            return
         }
+        revealConfigFolder()
     }
 }
 #endif
