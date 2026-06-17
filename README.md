@@ -8,20 +8,31 @@ phase boundary.
 
 Requires Xcode 15+ and macOS 14+ (for `MenuBarExtra`).
 
+`swift build` only produces a bare `TimeTrackApp` executable — there is no
+`.app` bundle on disk. A bare executable has no bundle identifier, which
+disables system notifications and launch-at-login. Use the bundling script to
+wrap it in a real, ad-hoc-signed `TimeTrack.app`:
+
 ```sh
-swift build -c release
-cp -R .build/release/TimeTrack.app /Applications/
+./tools/make-app.sh           # → .build/bundle/TimeTrack.app
+./tools/make-app.sh install   # also copies it to /Applications
 ```
 
-Or open `Package.swift` in Xcode and Run.
+To iterate during development you can also open `Package.swift` in Xcode and
+Run, or `swift run TimeTrackApp` — but those run the unbundled binary, so
+notifications stay inactive. Use the `.app` for the full experience.
 
-First launch: drag to `/Applications` so launch-at-login works cleanly. No
-notarization in v1 — right-click → Open the first time to bypass Gatekeeper.
+Gatekeeper: a locally built app is not quarantined, so it opens without a
+right-click → Open dance. The bundle is ad-hoc signed for local use only — it
+is **not** notarized, so it is not meant for redistribution.
+
+Launch-at-login is not yet automated (tracked as #21). For now add it manually:
+System Settings → General → Login Items → **+** → select TimeTrack.
 
 ## Data location
 
 ```
-~/Library/Application Support/TimeTrack/
+~/Library/Application Support/timetrack/
   events.db          SQLite, append-only event log + task table
   profiles.yaml      User-editable phase profiles
   tasks.yaml         User-editable task list (mirrored to DB on change)
