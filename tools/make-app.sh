@@ -26,7 +26,7 @@ cd "${ROOT}"
 
 # --- Bundle metadata ---------------------------------------------------------
 APP_NAME="TimeTrack"                       # user-facing name + .app / menu name
-BUNDLE_ID="com.steven-west.timetrack"      # reverse-DNS; identity for notification perms
+BUNDLE_ID="com.redwolf3.timetrack"         # reverse-DNS; identity for notification perms
 PRODUCT="TimeTrackApp"                     # SwiftPM executable product name
 MIN_MACOS="14.0"                           # matches Package.swift platforms
 VERSION="${VERSION:-0.1.0}"
