@@ -115,6 +115,12 @@ final class CyclePositionTests: XCTestCase {
             XCTAssertEqual(tracker.cyclePosition?.index, 1,
                 "after start the cycle position is the first phase")
             XCTAssertNotNil(tracker.cyclePosition?.count)
+
+            // After stop the tracker is idle again — must read nil even though
+            // stop() keeps (resets) the iterator rather than nilling it.
+            tracker.stop()
+            XCTAssertNil(tracker.cyclePosition,
+                "cyclePosition must be nil after stop() returns to idle")
         }
     }
 }
