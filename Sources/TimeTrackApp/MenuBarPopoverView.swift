@@ -85,7 +85,12 @@ struct MenuBarPopoverView: View {
                 Divider()
             }
 
+            // ── Config (reveal data dir / open YAML) ──────────────────────────
+            Divider()
+            configRow
+
             // ── Quit / Restart ────────────────────────────────────────────────
+            Divider()
             quitRestartRow
         }
         .frame(width: 280)
@@ -269,6 +274,46 @@ struct MenuBarPopoverView: View {
             }
         }
         .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+
+    // MARK: - Config row
+
+    // Reveal the data dir / open the YAML files in the default editor. Pairs with
+    // Restart (edit YAML → Restart re-ingests). All path logic + NSWorkspace calls
+    // live in AppState; these buttons only call its methods (no logic in views).
+    private var configRow: some View {
+        VStack(spacing: 6) {
+            Button("Open config folder") {
+                appState.revealConfigFolder()
+            }
+            .buttonStyle(.plain)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            HStack {
+                Spacer()
+                Button("Open profiles.yaml") {
+                    appState.openProfilesYAML()
+                }
+                .buttonStyle(.plain)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+                Text("·")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Button("Open tasks.yaml") {
+                    appState.openTasksYAML()
+                }
+                .buttonStyle(.plain)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                Spacer()
+            }
+        }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
     }

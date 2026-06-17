@@ -55,6 +55,11 @@ final class AppState: ObservableObject {
     private let store: Store
     private let tracker: Tracker
 
+    // App-support data directory (single source: dataDirectory() in App.swift).
+    // Held so the Config menu actions can reveal it / open the YAML files
+    // without re-deriving the path — invariant: no path duplicated (#18).
+    private let dataDir: URL
+
     // Background async tasks holding the stream subscriptions.
     // nonisolated(unsafe): deinit is nonisolated (SE-0371/Swift 5.10); we need
     // to cancel all three tasks from deinit without actor isolation.
@@ -68,8 +73,9 @@ final class AppState: ObservableObject {
 
     // MARK: - Init
 
-    init(store: Store, profilesURL: URL) throws {
+    init(store: Store, profilesURL: URL, dataDir: URL) throws {
         self.store = store
+        self.dataDir = dataDir
         self.tracker = try Tracker(store: store, profilesURL: profilesURL, idleSource: SystemIdleSource())
         self.profiles = tracker.profiles
         self.tasks = try store.userTasks()
@@ -560,6 +566,37 @@ final class AppState: ObservableObject {
         } catch {
             return
         }
+    }
+
+    // MARK: - Config folder / YAML actions (#18)
+
+    // Reveals the app-support data directory in Finder. Pairs with Restart:
+    // the user edits a YAML here, then Restart re-ingests it.
+    func revealConfigFolder() {
+        NSWorkspace.shared.activateFileViewerSelecting([dataDir])
+    }
+
+    // Opens profiles.yaml in the user's default editor.
+    func openProfilesYAML() {
+        openYAML(named: "profiles.yaml")
+    }
+
+    // Opens tasks.yaml in the user's default editor.
+    func openTasksYAML() {
+        openYAML(named: "tasks.yaml")
+    }
+
+    // Opens a YAML file in the data dir with the default editor. Falls back to
+    // revealing the folder when the file is absent (tasks.yaml is optional;
+    // profiles.yaml may not exist on first run) OR when the OS has no handler and
+    // open(_:) returns false — the action must never silently fail (#18).
+    private func openYAML(named filename: String) {
+        let url = dataDir.appendingPathComponent(filename)
+        if FileManager.default.fileExists(atPath: url.path),
+           NSWorkspace.shared.open(url) {
+            return
+        }
+        revealConfigFolder()
     }
 }
 #endif
