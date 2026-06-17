@@ -18,9 +18,11 @@ wrap it in a real, ad-hoc-signed `TimeTrack.app`:
 ./tools/make-app.sh install   # also copies it to /Applications
 ```
 
-To iterate during development you can also open `Package.swift` in Xcode and
-Run, or `swift run TimeTrackApp` — but those run the unbundled binary, so
-notifications stay inactive. Use the `.app` for the full experience.
+To iterate during development you can run the executable directly with
+`swift run TimeTrackApp`, or open `Package.swift` in Xcode and Run. Run that
+way the binary may have no bundle identifier, in which case system
+notifications are skipped (the app guards on a non-nil bundle id). Use the
+`.app` when you want notifications to work reliably.
 
 Gatekeeper: a locally built app is not quarantined, so it opens without a
 right-click → Open dance. The bundle is ad-hoc signed for local use only — it

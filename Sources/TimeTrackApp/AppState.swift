@@ -93,8 +93,9 @@ final class AppState: ObservableObject {
     // re-prompted. Must be nonisolated so it can fire a detached Task without
     // capturing the @MainActor-isolated self.
     private func requestNotificationAuthorization() {
-        // UNUserNotificationCenter requires a bundle ID — unavailable in unbundled
-        // binaries produced by `swift build`. Skip silently; Xcode builds have a bundle.
+        // UNUserNotificationCenter requires a bundle ID, which the bare executable
+        // from `swift build`/`swift run` lacks. Skip silently when absent; the
+        // assembled .app (tools/make-app.sh) provides one.
         guard Bundle.main.bundleIdentifier != nil else { return }
         // Use _Concurrency.Task to avoid conflict with TimeTrackKit.Task.
         _Concurrency.Task.detached {
