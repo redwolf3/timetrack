@@ -38,6 +38,18 @@ final class AppState: ObservableObject {
     // Armed boundary actions — non-empty only when state == .armed
     @Published var armedActions: [ArmAction] = []
 
+    // Phase-progress display (#20). All derived in updatePublished + the 1 Hz
+    // tick — never computed in the view (CLAUDE.md invariant 3).
+    // cyclePositionLabel: "2/4" for cyclic profiles, "" when single-phase or idle.
+    @Published var cyclePositionLabel: String = ""
+    // remainingSeconds: time until the current deadline; 0 when armed (overrun) or idle.
+    @Published var remainingSeconds: Int = 0
+    // phaseFraction: 0…1 elapsed-of-interval, drives the meter fill width.
+    @Published var phaseFraction: Double = 0
+    // meterColor: green→yellow→orange→red ramp derived from phaseFraction. Color
+    // mapping lives here (the app boundary), keeping the kit platform-agnostic.
+    @Published var meterColor: Color = .green
+
     // Profiles
     @Published var profiles: [Profile] = []
     @Published var selectedProfileName: String = "default"
@@ -70,6 +82,13 @@ final class AppState: ObservableObject {
     // Tracks the Date when the current phase/task started so elapsedSeconds
     // can be computed without querying the DB every second.
     private var phaseStart: Date = Date()
+
+    // Deadline of the current phase interval; nil when idle. Set in
+    // updatePublished and read by recomputeProgress on every tick so the meter /
+    // remaining-time follow the CURRENT deadline (extend() moves it), not the
+    // original durationMin. For .armed it is set to armedAt so the meter reads
+    // full (deadline reached, awaiting ack).
+    private var phaseDeadline: Date? = nil
 
     // MARK: - Init
 
@@ -200,6 +219,8 @@ final class AppState: ObservableObject {
                     } else {
                         self.elapsedSeconds = 0
                     }
+                    // Keep the remaining-time / meter live at 1 Hz alongside elapsed.
+                    self.recomputeProgress()
                     // Keep per-task time annotations live at 1 Hz.
                     // tracker.todaySeconds is already refreshed every second by the
                     // tick loop; copying it here avoids a separate DB query and ensures
@@ -231,8 +252,9 @@ final class AppState: ObservableObject {
             activeTaskId = nil
             armedActions = []
             phaseStart = Date()
+            phaseDeadline = nil
 
-        case let .tracking(taskId, phase, _):
+        case let .tracking(taskId, phase, deadline):
             isActive = true
             activeTaskId = taskId
             activeTaskName = tracker.activeTask?.name ?? ""
@@ -257,6 +279,7 @@ final class AppState: ObservableObject {
             // (durationMin - extendMin) * 60 the instant the user taps '+15 min'.
             phaseStart = tracker.phaseStartedAt
             elapsedSeconds = Int(Date().timeIntervalSince(phaseStart))
+            phaseDeadline = deadline
 
         case let .armed(taskId, phase, _, armedAt):
             isActive = true
@@ -271,11 +294,52 @@ final class AppState: ObservableObject {
 
             phaseStart = armedAt
             elapsedSeconds = Int(Date().timeIntervalSince(armedAt))
+            // Deadline reached → meter reads full (total interval is 0, handled
+            // by recomputeProgress). Awaiting the user's ack/extend/advance.
+            phaseDeadline = armedAt
         }
+
+        // Cycle position ("2/4") — shown only for cyclic profiles while active.
+        if isActive, let pos = tracker.cyclePosition, pos.count > 1 {
+            cyclePositionLabel = "\(pos.index)/\(pos.count)"
+        } else {
+            cyclePositionLabel = ""
+        }
+        recomputeProgress()
 
         // Refresh task list and profiles from tracker (they change rarely).
         tasks = tracker.tasks.filter { $0.category != "break" }
         refreshProfilePublished()
+    }
+
+    // Derives remainingSeconds / phaseFraction / meterColor from the current
+    // phase interval [phaseStart, phaseDeadline]. Uses the deadline (not the
+    // phase's original durationMin) so extend() moves the meter, per #20. Called
+    // from updatePublished and once per second by the elapsed timer.
+    private func recomputeProgress(now: Date = Date()) {
+        guard isActive, let deadline = phaseDeadline else {
+            remainingSeconds = 0
+            phaseFraction = 0
+            meterColor = .green
+            return
+        }
+        let total = deadline.timeIntervalSince(phaseStart)
+        let remaining = deadline.timeIntervalSince(now)
+        // Ceil so "1m left" shows until the final second rather than flicking to 0 early.
+        remainingSeconds = max(0, Int(remaining.rounded(.up)))
+        phaseFraction = total > 0 ? min(1, max(0, 1 - remaining / total)) : 1
+        meterColor = Self.meterColor(for: phaseFraction)
+    }
+
+    // Maps progress fraction to a colour ramp. Lives at the app boundary (like
+    // iconState) so SwiftUI Color never leaks into the kit.
+    private static func meterColor(for fraction: Double) -> Color {
+        switch fraction {
+        case ..<0.5:  return .green
+        case ..<0.75: return .yellow
+        case ..<0.9:  return .orange
+        default:      return .red
+        }
     }
 
     // Mirrors profile-related @Published properties from the tracker's authoritative

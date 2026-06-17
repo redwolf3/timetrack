@@ -122,6 +122,14 @@ final class CycleIterator {
         return phases[index]
     }
 
+    // Position of the current phase for display: 1-based index and the number of
+    // phases in the active cycle. `count` reflects the long-cycle override (so a
+    // pomodoro long-break cycle reports its real length), which is why it reads
+    // phasesForCurrentCycle() rather than profile.cycle.count. Non-mutating.
+    var cyclePosition: (index: Int, count: Int) {
+        (index + 1, phasesForCurrentCycle().count)
+    }
+
     // Non-mutating: returns what advance() would return without changing state.
     func peekNext() -> Phase {
         let phases = phasesForCurrentCycle()

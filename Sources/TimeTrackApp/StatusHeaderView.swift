@@ -28,26 +28,61 @@ struct StatusHeaderView: View {
             VStack(alignment: .leading, spacing: 2) {
                 statusLine
                 if !appState.phaseLabel.isEmpty {
-                    Text(appState.phaseLabel)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    HStack(spacing: 4) {
+                        Text(appState.phaseLabel)
+                        // Cycle position ("2/4") for cyclic profiles — empty
+                        // otherwise. Computed in AppState, not here.
+                        if !appState.cyclePositionLabel.isEmpty {
+                            Text(appState.cyclePositionLabel)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
             }
 
             Spacer()
 
-            // Elapsed time — shown whenever tracking or armed.
+            // Elapsed + remaining — shown whenever tracking or armed.
             // Gate on activeTaskName, the canonical idle signal derived by
             // updatePublished, rather than elapsedSeconds which may briefly
             // lag a state transition and show a stale non-zero value.
             if !appState.activeTaskName.isEmpty {
-                Text(formatElapsed(appState.elapsedSeconds))
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .trailing, spacing: 1) {
+                    Text(formatElapsed(appState.elapsedSeconds))
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    // Remaining-time readout, coloured by the same meter ramp.
+                    // Hidden at 0 (armed/overrun) — elapsed already shows overrun.
+                    if appState.remainingSeconds > 0 {
+                        Text("\(appState.formatDuration(appState.remainingSeconds)) left")
+                            .font(.caption2)
+                            .foregroundStyle(appState.meterColor)
+                    }
+                }
             }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+        // Time-remaining colour meter: a subtle fill that grows toward the
+        // trailing edge as the deadline nears, tinted by phaseFraction. Width
+        // and colour come from AppState; the view only draws them.
+        .background(meterFill)
+    }
+
+    // Background meter fill behind the header (the "task+timer bar"). Only drawn
+    // while tracking/armed; sits under the material so text stays legible.
+    @ViewBuilder
+    private var meterFill: some View {
+        if !appState.activeTaskName.isEmpty {
+            GeometryReader { geo in
+                appState.meterColor
+                    .opacity(0.18)
+                    .frame(width: geo.size.width * appState.phaseFraction)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
     }
 
     // The primary status line. Styling is driven by iconColor so the single

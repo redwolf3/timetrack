@@ -43,6 +43,14 @@ public final class Tracker {
     // now + durationMin).
     public private(set) var phaseStartedAt: Date = Date()
 
+    // Position of the current phase within the active cycle, as (1-based index,
+    // total phases in the cycle), or nil when idle (no live iterator). Reflects
+    // the long-cycle override. The app uses this for the "Work 2/4" cycle
+    // indicator; the CycleIterator itself stays private to the kit.
+    public var cyclePosition: (index: Int, count: Int)? {
+        iterator?.cyclePosition
+    }
+
     // Observation seam, replacing Combine. Single-subscriber AsyncStreams: the
     // app awaits them. The kit decides what should happen (a state transition,
     // a sound to play); the app performs any side effect.
