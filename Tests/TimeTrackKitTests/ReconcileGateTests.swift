@@ -28,9 +28,16 @@ final class ReconcileGateTests: XCTestCase {
             extendMin: nil, comment: nil))
     }
 
-    private func todayWindow() -> (from: Date, to: Date) {
-        let today = Calendar.current.startOfDay(for: Date())
-        return (today, today)
+    // A FIXED PAST day used as the report window. Anchored to the past (not
+    // today) so the seeded interval is always inside sliceTimeline's clamp:
+    // reconciledReport clamps each day to min(endOfDay, now), so a "today"
+    // fixture seeded at startOfDay+1h..2h reports ZERO time when the suite runs
+    // before that hour (e.g. 00:00–02:00), failing the positive-time assertions.
+    // Mirrors the fixed-past-day pattern used by the promote/retire tests below.
+    private func pastDayWindow() -> (from: Date, to: Date) {
+        let cal = Calendar.current
+        let pastDay = cal.date(byAdding: .day, value: -3, to: cal.startOfDay(for: Date()))!
+        return (pastDay, pastDay)
     }
 
     // MARK: - Tests
@@ -44,7 +51,7 @@ final class ReconcileGateTests: XCTestCase {
         task = try store.upsertTask(task)
         let taskId = task.id!
 
-        let (from, to) = todayWindow()
+        let (from, to) = pastDayWindow()
         try appendOneHour(store: store, taskId: taskId, day: from)
 
         XCTAssertThrowsError(try store.reconciledReport(from: from, to: to)) { error in
@@ -71,7 +78,7 @@ final class ReconcileGateTests: XCTestCase {
         let ktId = try XCTUnwrap(kt.id)
         try store.bind(taskId: taskId, knownTaskId: ktId, comment: nil)
 
-        let (from, to) = todayWindow()
+        let (from, to) = pastDayWindow()
         try appendOneHour(store: store, taskId: taskId, day: from)
 
         XCTAssertThrowsError(try store.reconciledReport(from: from, to: to)) { error in
@@ -97,7 +104,7 @@ final class ReconcileGateTests: XCTestCase {
         let kt = try store.addKnownTask(jiraKey: "ABC-1", description: "Known work")
         try store.bind(taskId: taskId, knownTaskId: try XCTUnwrap(kt.id), comment: nil)
 
-        let (from, to) = todayWindow()
+        let (from, to) = pastDayWindow()
         try appendOneHour(store: store, taskId: taskId, day: from)
 
         let rows = try store.reconciledReport(from: from, to: to)
@@ -227,7 +234,7 @@ final class ReconcileGateTests: XCTestCase {
 
         let breakId = try store.breakTaskId()
 
-        let (from, to) = todayWindow()
+        let (from, to) = pastDayWindow()
         try appendOneHour(store: store, taskId: breakId, day: from)
 
         // No project tasks at all — gate should pass, returning empty rows.
@@ -245,7 +252,7 @@ final class ReconcileGateTests: XCTestCase {
         let taskId = task.id!
 
         // No events appended — task has zero time.
-        let (from, to) = todayWindow()
+        let (from, to) = pastDayWindow()
         let unbound = try store.unreconciled(from: from, to: to)
         XCTAssertFalse(unbound.contains(where: { $0.task.id == taskId }),
             "Zero-second task must not appear in the unreconciled list")
@@ -274,7 +281,7 @@ final class ReconcileGateTests: XCTestCase {
         try store.bind(taskId: taskId, knownTaskId: try XCTUnwrap(ktA.id), comment: nil)
         try store.bind(taskId: taskId, knownTaskId: try XCTUnwrap(ktB.id), comment: nil)
 
-        let (from, to) = todayWindow()
+        let (from, to) = pastDayWindow()
         try appendOneHour(store: store, taskId: taskId, day: from)
 
         let rows = try store.reconciledReport(from: from, to: to)
