@@ -214,11 +214,13 @@ final class AppState: ObservableObject {
                 catch { return }
                 guard let self else { return }
                 await MainActor.run {
-                    if self.isActive {
-                        self.elapsedSeconds = Int(Date().timeIntervalSince(self.phaseStart))
-                    } else {
-                        self.elapsedSeconds = 0
-                    }
+                    // Nothing changes per-second while idle: updatePublished
+                    // already zeroed elapsedSeconds and progress on the .idle
+                    // transition, and todaySeconds only accrues while tracking.
+                    // Skip the body at rest so we don't fire objectWillChange
+                    // (elapsed / remaining / meter / todaySeconds) every second.
+                    guard self.isActive else { return }
+                    self.elapsedSeconds = Int(Date().timeIntervalSince(self.phaseStart))
                     // Keep the remaining-time / meter live at 1 Hz alongside elapsed.
                     self.recomputeProgress()
                     // Keep per-task time annotations live at 1 Hz.
