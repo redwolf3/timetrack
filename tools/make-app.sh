@@ -104,9 +104,20 @@ echo "✓ built ${APP}  (v${VERSION} build ${BUILD}, id ${BUNDLE_ID})"
 
 # --- Optional install --------------------------------------------------------
 if [ "${1:-}" = "install" ]; then
-	DEST="/Applications/${APP_NAME}.app"
+	DEST_DIR="/Applications"
+	DEST="${DEST_DIR}/${APP_NAME}.app"
+	# /Applications is writable by admin users on a default macOS setup, but not
+	# on a managed/non-admin Mac. Elevate ONLY the file ops in that case — the
+	# build already ran as the invoking user, so .build stays user-owned and we
+	# never run `swift build` as root. If sudo is unavailable/denied it fails with
+	# its own clear message rather than a terse set -e abort from rm/cp.
+	SUDO=""
+	if [ ! -w "${DEST_DIR}" ]; then
+		echo "▸ ${DEST_DIR} is not writable by $(whoami) — using sudo for the install copy"
+		SUDO="sudo"
+	fi
 	echo "▸ installing to ${DEST}"
-	rm -rf "${DEST}"
-	cp -R "${APP}" "${DEST}"
+	${SUDO} rm -rf "${DEST}"
+	${SUDO} cp -R "${APP}" "${DEST}"
 	echo "✓ installed ${DEST}"
 fi
