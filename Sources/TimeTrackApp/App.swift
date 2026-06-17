@@ -30,7 +30,7 @@ struct TimeTrackSwiftUIApp: App {
             // yaml the user edited with conflicting entries cannot be silently
             // ignored without hiding a bug.
             try TasksLoader.ingest(from: dir.appendingPathComponent("tasks.yaml"), into: store)
-            return try AppState(store: store, profilesURL: profilesURL)
+            return try AppState(store: store, profilesURL: profilesURL, dataDir: dir)
         } catch {
             fatalError("TimeTrackApp: failed to open store or init AppState: \(error)")
         }
