@@ -57,6 +57,12 @@ final class AppState: ObservableObject {
     // Today totals (taskId -> seconds) for row annotations
     @Published var todaySeconds: [Int64: Int] = [:]
 
+    // Launch-at-login state. Reflects SMAppService.mainApp.status; false when
+    // running as a bare executable (no bundle id) since SMAppService is a no-op
+    // in that context. Re-read from the live service status each time the menu
+    // appears so external changes (System Settings) are visible immediately.
+    @Published var launchAtLogin: Bool = false
+
     // isActive is derived once in updatePublished and read by the elapsed timer.
     // This lets startElapsedTimer avoid inspecting TrackerState directly, keeping
     // updatePublished the ONLY TrackerState inspection site in the app layer.
@@ -71,6 +77,11 @@ final class AppState: ObservableObject {
     // Held so the Config menu actions can reveal it / open the YAML files
     // without re-deriving the path — invariant: no path duplicated (#18).
     private let dataDir: URL
+
+    // Wraps SMAppService.mainApp for launch-at-login registration. A single
+    // instance is sufficient; SMAppService itself is stateless (calls through
+    // to the system daemon each time).
+    private let loginItemManager = LoginItemManager()
 
     // Background async tasks holding the stream subscriptions.
     // nonisolated(unsafe): deinit is nonisolated (SE-0371/Swift 5.10); we need
@@ -103,6 +114,9 @@ final class AppState: ObservableObject {
         subscribeToEffectStream()
         startElapsedTimer()
         requestNotificationAuthorization()
+        // Seed the published property from the live service status so the
+        // toggle reflects reality from first appearance (before any user tap).
+        launchAtLogin = loginItemManager.isEnabled
     }
 
     // Request UNUserNotificationCenter authorization for escalation ceiling
@@ -636,6 +650,24 @@ final class AppState: ObservableObject {
         } catch {
             return
         }
+    }
+
+    // MARK: - Launch-at-login (#21)
+
+    // Re-reads the live SMAppService status and updates the published property.
+    // Called when the popover appears so external changes (user toggling in
+    // System Settings) are reflected without requiring an app restart.
+    func refreshLaunchAtLogin() {
+        launchAtLogin = loginItemManager.isEnabled
+    }
+
+    // Registers or unregisters the app as a login item. After the call the
+    // published property is updated from the live service status (not from the
+    // requested value) so the toggle always reflects the real outcome, including
+    // cases where SMAppService rejected the request (e.g. running unbundled).
+    func setLaunchAtLogin(_ enable: Bool) {
+        loginItemManager.setEnabled(enable)
+        launchAtLogin = loginItemManager.isEnabled
     }
 
     // MARK: - Config folder / YAML actions (#18)
