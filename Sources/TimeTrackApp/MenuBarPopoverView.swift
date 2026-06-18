@@ -89,12 +89,21 @@ struct MenuBarPopoverView: View {
             Divider()
             configRow
 
+            // ── Launch at login ───────────────────────────────────────────────
+            Divider()
+            launchAtLoginRow
+
             // ── Quit / Restart ────────────────────────────────────────────────
             Divider()
             quitRestartRow
         }
         .frame(width: 280)
         .background(.regularMaterial)
+        .onAppear {
+            // Refresh from live SMAppService status each time the popover
+            // opens so external changes (System Settings) are visible immediately.
+            appState.refreshLaunchAtLogin()
+        }
         .sheet(isPresented: $showExtendSheet) {
             extendSheet
         }
@@ -314,6 +323,28 @@ struct MenuBarPopoverView: View {
                 Spacer()
             }
         }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+
+    // MARK: - Launch at login row
+
+    // Toggle that registers / unregisters the app as a login item via
+    // SMAppService. Requires the assembled .app bundle (tools/make-app.sh);
+    // when running as a bare executable the toggle renders but remains off —
+    // SMAppService rejects unbundled executables and AppState surfaces the
+    // real post-call status rather than the requested value (#21 design note).
+    private var launchAtLoginRow: some View {
+        Toggle(isOn: Binding(
+            get: { appState.launchAtLogin },
+            set: { appState.setLaunchAtLogin($0) }
+        )) {
+            Text("Launch at login")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .toggleStyle(.switch)
+        .controlSize(.mini)
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
     }

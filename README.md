@@ -28,8 +28,13 @@ Gatekeeper: a locally built app is not quarantined, so it opens without a
 right-click → Open dance. The bundle is ad-hoc signed for local use only — it
 is **not** notarized, so it is not meant for redistribution.
 
-Launch-at-login is not yet automated (tracked as #21). For now add it manually:
-System Settings → General → Login Items → **+** → select TimeTrack.
+Launch-at-login is controlled via the **Launch at login** toggle in the
+menu-bar popover (bottom of the menu, above Quit/Restart). It uses
+`SMAppService` and requires the assembled `.app` bundle from
+`tools/make-app.sh` — when running as a bare executable via `swift run` the
+toggle renders but registration is a no-op (SMAppService requires a bundle
+identifier). After toggling, the app appears in System Settings → General →
+Login Items.
 
 ## Data location
 
