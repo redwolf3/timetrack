@@ -30,6 +30,11 @@ struct TimeTrackSwiftUIApp: App {
             // yaml the user edited with conflicting entries cannot be silently
             // ignored without hiding a bug.
             try TasksLoader.ingest(from: dir.appendingPathComponent("tasks.yaml"), into: store)
+            // Ingest optional known_tasks.yaml (the reconcile spine). Same
+            // fail-fast severity as tasks.yaml: a conflicting hand-edited file is
+            // a bug to surface, not to swallow. Promotes go through the append-only
+            // overlay inside the loader; no history is mutated here.
+            try KnownTasksLoader.ingest(from: dir.appendingPathComponent("known_tasks.yaml"), into: store)
             return try AppState(store: store, profilesURL: profilesURL, dataDir: dir)
         } catch {
             fatalError("TimeTrackApp: failed to open store or init AppState: \(error)")
