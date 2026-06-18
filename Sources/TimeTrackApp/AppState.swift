@@ -518,8 +518,7 @@ final class AppState: ObservableObject {
 
     // Re-fetches all reconcile state from the store. Called from
     // ReconcileView.onAppear — synchronous GRDB on @MainActor, matching
-    // refreshHistory's pattern. Errors swallow to empty arrays; if the store
-    // throws the user sees an empty/clean panel which is a safe failure mode.
+    // refreshHistory's pattern.
     func refreshReconcile() {
         // Sub-15 resolutions are per-session: a stale choice must never silently apply
         // to a later session (DESIGN.md — no silent billing decision). Reset on each refresh.
@@ -527,9 +526,20 @@ final class AppState: ObservableObject {
         let w = reconcileWindow
         // Single timeline walk for both gate conditions: reconcileState(from:to:) combines
         // the previous unreconciled() + provisionalWithTime() calls into one windowSeconds pass.
-        let state = (try? store.reconcileState(from: w.from, to: w.to))
-        reconcileUnbound    = state?.unbound ?? []
-        reconcileProvisional = state?.provisional ?? []
+        //
+        // A store error must NOT blank both lists via try?/??[]: that would make
+        // reconcileIsClean true and hide real reconciliation debt in the menu/display.
+        // On error, preserve the previous snapshot so the UI is stale-but-honest
+        // rather than falsely "clean". The actual reconcile gate (reconciledReport)
+        // recomputes independently and is unaffected by this defensive skip.
+        do {
+            let state = try store.reconcileState(from: w.from, to: w.to)
+            reconcileUnbound     = state.unbound
+            reconcileProvisional = state.provisional
+        } catch {
+            // Leave reconcileUnbound / reconcileProvisional as they were; writing []
+            // would falsely signal reconcile-clean when the store is unavailable.
+        }
         reconcileKnownTasks  = (try? store.knownTasks(activeOnly: true)) ?? []
         reconcileIsClean     = reconcileUnbound.isEmpty && reconcileProvisional.isEmpty
 
