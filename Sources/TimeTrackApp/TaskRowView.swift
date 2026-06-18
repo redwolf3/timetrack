@@ -41,6 +41,13 @@ struct TaskRowView: View {
             appState.select(taskId: id)
         } label: {
             HStack {
+                // Play/active indicator: the active row shows a filled dot so the
+                // user always knows which task is running; inactive rows reveal a
+                // play triangle on hover to signal "tap to switch here".
+                // Fixed-width frame keeps the task name aligned across all rows.
+                startIndicator
+                    .frame(width: 16, alignment: .center)
+
                 Text(task.name)
                     .font(isActive ? .body.bold() : .body)
                     .foregroundStyle(isActive ? Color.accentColor : Color.primary)
@@ -67,6 +74,38 @@ struct TaskRowView: View {
         // not linger as stale true while the active background takes over.
         .onChange(of: isActive) { _, active in
             if active { isHovered = false }
+        }
+        // The icons are decorative; VoiceOver should read the task name (and
+        // today's time annotation) only. The active/tracked state is conveyed
+        // via accessibilityValue so it remains perceivable without the icon.
+        .accessibilityValue(isActive ? "Tracking" : "")
+    }
+
+    // The leading indicator column.
+    // Active row: filled circle in accent colour — permanently visible, so the
+    // running task is identifiable at a glance without hover.
+    // Inactive row: play triangle is always in the hierarchy at opacity 0 at rest
+    // and fades to 1 on hover. Keeping the same view identity (rather than
+    // swapping Image / Color.clear) lets SwiftUI animate the opacity transition
+    // smoothly instead of a hard swap. Layout width is identical in both states,
+    // so task names stay flush across all rows.
+    @ViewBuilder
+    private var startIndicator: some View {
+        if isActive {
+            Image(systemName: "circle.fill")
+                .imageScale(.small)
+                .foregroundStyle(Color.accentColor)
+                // Decorative: active state is conveyed by the button's accessibilityValue.
+                .accessibilityHidden(true)
+        } else {
+            Image(systemName: "play.fill")
+                .imageScale(.small)
+                .foregroundStyle(Color.secondary)
+                .opacity(isHovered ? 1 : 0)
+                .animation(.easeInOut(duration: 0.12), value: isHovered)
+                // Decorative: opacity-0 at rest; hiding prevents VoiceOver announcing
+                // "Play" on every inactive row regardless of hover state.
+                .accessibilityHidden(true)
         }
     }
 }
