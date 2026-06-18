@@ -220,9 +220,12 @@ final class AppState: ObservableObject {
                     // Skip the body at rest so we don't fire objectWillChange
                     // (elapsed / remaining / meter / todaySeconds) every second.
                     guard self.isActive else { return }
-                    self.elapsedSeconds = Int(Date().timeIntervalSince(self.phaseStart))
+                    // One timestamp for both elapsed and remaining so they stay
+                    // mutually consistent (and one fewer Date() per tick).
+                    let now = Date()
+                    self.elapsedSeconds = Int(now.timeIntervalSince(self.phaseStart))
                     // Keep the remaining-time / meter live at 1 Hz alongside elapsed.
-                    self.recomputeProgress()
+                    self.recomputeProgress(now: now)
                     // Keep per-task time annotations live at 1 Hz.
                     // tracker.todaySeconds is already refreshed every second by the
                     // tick loop; copying it here avoids a separate DB query and ensures
