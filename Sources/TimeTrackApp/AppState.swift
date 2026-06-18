@@ -525,8 +525,11 @@ final class AppState: ObservableObject {
         // to a later session (DESIGN.md — no silent billing decision). Reset on each refresh.
         subFifteenResolutions = [:]
         let w = reconcileWindow
-        reconcileUnbound    = (try? store.unreconciled(from: w.from, to: w.to)) ?? []
-        reconcileProvisional = (try? store.provisionalWithTime(from: w.from, to: w.to)) ?? []
+        // Single timeline walk for both gate conditions: reconcileState(from:to:) combines
+        // the previous unreconciled() + provisionalWithTime() calls into one windowSeconds pass.
+        let state = (try? store.reconcileState(from: w.from, to: w.to))
+        reconcileUnbound    = state?.unbound ?? []
+        reconcileProvisional = state?.provisional ?? []
         reconcileKnownTasks  = (try? store.knownTasks(activeOnly: true)) ?? []
         reconcileIsClean     = reconcileUnbound.isEmpty && reconcileProvisional.isEmpty
 

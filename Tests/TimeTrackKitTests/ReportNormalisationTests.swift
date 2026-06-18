@@ -447,4 +447,60 @@ final class ReportNormalisationTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - Regression: sub-second truncation across many split intervals
+    //
+    // The old code did Int((e.ts - lastTs) / 1000) per segment — truncating sub-second
+    // remainders on each segment. With many short switch events each lasting N*1000+999 ms
+    // the repeated floor loses up to 999 ms per segment, which adds up to ≥1 s across
+    // the day. The fix accumulates raw ms per task across ALL segments, then divides once.
+    //
+    // Construct 10 segments each of 1_999 ms (1.999 s). With the old per-segment
+    // truncation each yields Int(1_999/1_000) = 1 s, total = 10 s.
+    // Correct answer: floor(10 * 1_999 / 1_000) = floor(19_990 / 1_000) = 19 s.
+    // Old code loses 9 s. New code must report exactly 19 s.
+    func testSubSecondTruncationAccumulation() throws {
+        let store = try makeStore()
+        let (taskA, _) = try makeTaskBound(store, name: "A", jiraKey: "TRUNC-A")
+        let (taskB, _) = try makeTaskBound(store, name: "B", jiraKey: "TRUNC-B")
+
+        // Alternate A/B segments: A for 1_999 ms, B for 1 ms (separator), repeat 10 times.
+        // Each A segment is 1_999 ms = 1.999 s. Floor of 10 × 1_999 ms = 19 s.
+        // The 1 ms B separators are negligible and just split the event stream.
+        var base = baseMs(pastDay) + 6 * 3_600_000   // anchor 6h into past day
+        for _ in 0 ..< 10 {
+            // A segment: 1_999 ms
+            try store.append(Event(
+                id: nil, ts: base, type: EventType.start.rawValue,
+                taskId: taskA, prevTaskId: nil,
+                phaseId: nil, profileName: nil, extendMin: nil, comment: nil))
+            // Switch to B after 1_999 ms (closes A's segment at this ts).
+            let switchTs = base + 1_999
+            try store.append(Event(
+                id: nil, ts: switchTs, type: EventType.switch.rawValue,
+                taskId: taskB, prevTaskId: taskA,
+                phaseId: nil, profileName: nil, extendMin: nil, comment: nil))
+            // Switch back to A after 1 ms (closes B's separator segment).
+            let backTs = switchTs + 1
+            try store.append(Event(
+                id: nil, ts: backTs, type: EventType.switch.rawValue,
+                taskId: taskA, prevTaskId: taskB,
+                phaseId: nil, profileName: nil, extendMin: nil, comment: nil))
+            base = backTs
+        }
+        // Stop A after 0 ms to close the final open interval deterministically.
+        try store.append(Event(
+            id: nil, ts: base, type: EventType.stop.rawValue,
+            taskId: nil, prevTaskId: taskA,
+            phaseId: nil, profileName: nil, extendMin: nil, comment: nil))
+
+        // report(day:) should credit task A with exactly 19 s (not 10 s as the
+        // old per-segment truncation would have given).
+        let rows = try store.report(day: pastDay)
+        let aRow = try XCTUnwrap(rows.first(where: { $0.task.id == taskA }),
+            "Task A must appear in the day report")
+        XCTAssertEqual(aRow.totalSeconds, 19,
+            "10 × 1_999 ms segments must accumulate to 19 s (floor of 19_990 ms / 1000), " +
+            "not 10 s as per-segment truncation would give")
+    }
 }
