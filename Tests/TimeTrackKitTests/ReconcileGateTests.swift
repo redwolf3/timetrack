@@ -258,6 +258,107 @@ final class ReconcileGateTests: XCTestCase {
             "Zero-second task must not appear in the unreconciled list")
     }
 
+    // reconcileState(from:to:) must be semantically identical to calling
+    // unreconciled(from:to:) and provisionalWithTime(from:to:) separately.
+    // This test builds a fixture that exercises all four exclusion branches in
+    // a single window, then compares the combined-walk result against the two
+    // independent walks by task-id set and per-task totalSeconds dictionary.
+    //
+    // Fixture:
+    //   taskUnbound     — project task, NO binding, 1 h time  → in unbound only
+    //   taskProvisional — project task, bound to provisional KT, 1 h time → in provisional only
+    //   taskBound       — project task, bound to non-provisional KT, 1 h time → in neither
+    //   breakId         — break task, 1 h time                → excluded from unbound
+    //   taskZero        — project task, NO binding, 0 time    → excluded from both
+    func testReconcileStateMatchesSeparateMethods() throws {
+        let dir = try makeTmpDir()
+        let store = try Store(url: dir.appendingPathComponent("test.db"))
+
+        // --- Unbound project task (no binding, has time) ---
+        var taskUnbound = Task(id: nil, name: "Unbound", code: nil, category: "project", archived: false)
+        taskUnbound = try store.upsertTask(taskUnbound)
+        let unboundId = try XCTUnwrap(taskUnbound.id)
+
+        // --- Provisional: project task bound to a provisional KnownTask (no jiraKey) ---
+        var taskProvisional = Task(id: nil, name: "Provisional", code: nil, category: "project", archived: false)
+        taskProvisional = try store.upsertTask(taskProvisional)
+        let provisionalTaskId = try XCTUnwrap(taskProvisional.id)
+        let provisionalKT = try store.addKnownTask(jiraKey: nil, description: "WIP prov")
+        let provisionalKTId = try XCTUnwrap(provisionalKT.id)
+        try store.bind(taskId: provisionalTaskId, knownTaskId: provisionalKTId, comment: nil)
+
+        // --- Bound non-provisional: project task bound to a real JIRA key ---
+        var taskBound = Task(id: nil, name: "Bound", code: nil, category: "project", archived: false)
+        taskBound = try store.upsertTask(taskBound)
+        let boundTaskId = try XCTUnwrap(taskBound.id)
+        let nonProvKT = try store.addKnownTask(jiraKey: "EQUIV-1", description: "Real entry")
+        let nonProvKTId = try XCTUnwrap(nonProvKT.id)
+        try store.bind(taskId: boundTaskId, knownTaskId: nonProvKTId, comment: nil)
+
+        // --- Break task (should never appear in unbound) ---
+        let breakId = try store.breakTaskId()
+
+        // --- Zero-time project task (no events; must be excluded) ---
+        var taskZero = Task(id: nil, name: "Zero", code: nil, category: "project", archived: false)
+        taskZero = try store.upsertTask(taskZero)
+
+        // Anchor all events to a fixed past day so the window is fully closed.
+        let (from, to) = pastDayWindow()
+        try appendOneHour(store: store, taskId: unboundId,         day: from, hourOffset: 1)
+        try appendOneHour(store: store, taskId: provisionalTaskId, day: from, hourOffset: 2)
+        try appendOneHour(store: store, taskId: boundTaskId,       day: from, hourOffset: 3)
+        try appendOneHour(store: store, taskId: breakId,           day: from, hourOffset: 4)
+        // taskZero intentionally gets no events.
+
+        // --- Call both independent methods (the baseline) ---
+        let unreconciledList = try store.unreconciled(from: from, to: to)
+        let provisionalList  = try store.provisionalWithTime(from: from, to: to)
+
+        // --- Call the combined method (the method under test) ---
+        let state = try store.reconcileState(from: from, to: to)
+
+        // MARK: unbound equivalence
+
+        // Set of task-ids must match exactly.
+        let expectedUnboundIds = Set(unreconciledList.map { $0.task.id })
+        let actualUnboundIds   = Set(state.unbound.map { $0.task.id })
+        XCTAssertEqual(actualUnboundIds, expectedUnboundIds,
+            "reconcileState.unbound task-id set must match unreconciled()")
+
+        // Per-task totalSeconds must also match (keyed by optional task id).
+        let expectedUnboundSecs = Dictionary(
+            uniqueKeysWithValues: unreconciledList.map { ($0.task.id, $0.totalSeconds) })
+        let actualUnboundSecs = Dictionary(
+            uniqueKeysWithValues: state.unbound.map { ($0.task.id, $0.totalSeconds) })
+        XCTAssertEqual(actualUnboundSecs, expectedUnboundSecs,
+            "reconcileState.unbound totalSeconds must match unreconciled()")
+
+        // Sanity: unboundId must be present; break/provisional/bound/zero must not.
+        XCTAssertTrue(actualUnboundIds.contains(unboundId),
+            "Unbound project task must appear in unbound")
+        XCTAssertFalse(actualUnboundIds.contains(breakId),
+            "Break task must not appear in unbound")
+        XCTAssertFalse(actualUnboundIds.contains(provisionalTaskId),
+            "Bound-to-provisional task must not appear in unbound")
+        XCTAssertFalse(actualUnboundIds.contains(boundTaskId),
+            "Non-provisional bound task must not appear in unbound")
+        XCTAssertFalse(actualUnboundIds.contains(taskZero.id),
+            "Zero-time task must not appear in unbound")
+
+        // MARK: provisional equivalence
+
+        let expectedProvIds = Set(provisionalList.compactMap { $0.id })
+        let actualProvIds   = Set(state.provisional.compactMap { $0.id })
+        XCTAssertEqual(actualProvIds, expectedProvIds,
+            "reconcileState.provisional KnownTask-id set must match provisionalWithTime()")
+
+        // Sanity: provisionalKTId in list; nonProvKTId absent.
+        XCTAssertTrue(actualProvIds.contains(provisionalKTId),
+            "Provisional KnownTask with bound time must appear in provisional")
+        XCTAssertFalse(actualProvIds.contains(nonProvKTId),
+            "Non-provisional KnownTask must not appear in provisional")
+    }
+
     // Last reconcile_bind event wins when a task has been rebound multiple times.
     func testLastBindWins() throws {
         let dir = try makeTmpDir()
