@@ -38,6 +38,22 @@ System Settings → General → Login Items → **+** → select TimeTrack.
   events.db          SQLite, append-only event log + task table
   profiles.yaml      User-editable phase profiles
   tasks.yaml         User-editable task list (mirrored to DB on change)
+  known_tasks.yaml   User-editable Known Tasks registry — the reconcile spine
+```
+
+`known_tasks.yaml` bulk-defines the valid reconciliation targets (the JIRA keys
+time can be bound to). Each entry is a `description` plus an optional `jiraKey`;
+omit the key for a provisional entry. On load it upserts idempotently: keyed
+entries are matched by `jiraKey`, keyless ones by `description`; adding a key to
+a description that already exists provisionally **promotes** it (append-only —
+existing bindings follow automatically). Entries removed from the file are left
+in place; retiring is an explicit `timetrack known retire`.
+
+```yaml
+known_tasks:
+  - jiraKey: PROJ-123
+    description: Build the widget
+  - description: Misc unsorted work    # provisional — no key yet
 ```
 
 `events.db` is the source of truth. YAML files are convenience for editing.

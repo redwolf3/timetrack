@@ -802,6 +802,23 @@ public final class Store {
         return true
     }
 
+    // Update a known_tasks entry's description in place. Unlike jiraKey and the
+    // provisional/retired flags — which are overlay-managed and corrected only by
+    // appended promote/retire events — the description is a plain label the
+    // overlay never reads, so updating the base row is the canonical edit (mirror
+    // of how TasksLoader rewrites a task's name). Returns true if a row changed;
+    // false if the id is unknown or the description already matches.
+    @discardableResult
+    public func updateKnownTaskDescription(id: Int64, description: String) throws -> Bool {
+        try dbQueue.write { db in
+            guard var k = try KnownTask.fetchOne(db, key: id) else { return false }
+            guard k.description != description else { return false }
+            k.description = description
+            try k.update(db)
+            return true
+        }
+    }
+
     // MARK: - Reconciliation
     //
     // Capture is loose; reporting is strict. Before a reconciled (submittable)

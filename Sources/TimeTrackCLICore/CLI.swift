@@ -101,6 +101,15 @@ public enum CLI {
             try TasksLoader.ingest(from: dir.appendingPathComponent("tasks.yaml"), into: store)
         }
 
+        // Ingest optional known_tasks.yaml (the reconcile spine) before any
+        // command that consults or mutates the registry, so file-defined entries
+        // are visible. Like tasks.yaml above, this is gated to keep pure
+        // read-only commands (status, report) off the write path per the WAL
+        // caveat. Missing file is a silent no-op; validation failures propagate.
+        if command == "known" || command == "reconcile" || command == "bind" {
+            try KnownTasksLoader.ingest(from: dir.appendingPathComponent("known_tasks.yaml"), into: store)
+        }
+
         let rest = Array(arguments.dropFirst())
         switch command {
         case "start":      try cmdStart(rest, store: store, dataDir: dir, out: out)
