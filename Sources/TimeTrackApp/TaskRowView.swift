@@ -76,7 +76,7 @@ struct TaskRowView: View {
             if active { isHovered = false }
         }
         // The icons are decorative; VoiceOver should read the task name (and
-        // elapsed-time annotation) only. The active/tracked state is conveyed
+        // today's time annotation) only. The active/tracked state is conveyed
         // via accessibilityValue so it remains perceivable without the icon.
         .accessibilityValue(isActive ? "Tracking" : "")
     }
