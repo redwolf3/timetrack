@@ -138,7 +138,7 @@ final class KnownTasksLoaderTests: XCTestCase {
 
     // MARK: - Test 6: Promote path
 
-    func testPromotePathAssignsjiraKeyToProvisionalEntry() throws {
+    func testPromotePathAssignsJiraKeyToProvisionalEntry() throws {
         let dir = try makeTmpDir()
         let store = try makeStore(in: dir)
 
@@ -495,5 +495,104 @@ final class KnownTasksLoaderTests: XCTestCase {
 
         let all = try store.knownTasks(activeOnly: false)
         XCTAssertEqual(all.count, 2)
+    }
+
+    // MARK: - Regression: within-pass snapshot consistency
+
+    // Scenario 1: non-idempotent ingest without snapshot sync.
+    //
+    // Pre-seed a provisional "X". Ingest a file containing BOTH a keyed entry
+    // {PROJ-1, "X"} AND a keyless entry {description: "X"}.
+    //
+    // Without snapshot sync: the keyless entry still sees "X" as provisional in
+    // the stale snapshot and no-ops. On the SECOND ingest the row is now
+    // non-provisional, the keyless entry finds no provisional match, and inserts a
+    // new provisional row → second ingest returns non-zero (not idempotent).
+    //
+    // With snapshot sync: after the promote the in-memory snapshot immediately
+    // marks the row non-provisional. The keyless entry correctly sees no
+    // provisional match and inserts its own distinct provisional on the FIRST
+    // pass. The SECOND ingest finds PROJ-1 by key (no-op) and the new provisional
+    // by description (no-op) → returns 0. Idempotency is restored.
+    func testIngestWithKeyedAndKeylessForSameDescriptionIsIdempotent() throws {
+        let dir = try makeTmpDir()
+        let store = try makeStore(in: dir)
+
+        // Pre-seed a provisional entry that will be promoted by the keyed YAML line.
+        _ = try store.addKnownTask(jiraKey: nil, description: "Feature work")
+
+        // YAML has both a keyed entry (promotes the provisional) and a separate
+        // keyless entry (distinct provisional intent — two entries in the file,
+        // two eventual registry rows).
+        let yaml = """
+        known_tasks:
+          - jiraKey: PROJ-1
+            description: "Feature work"
+          - description: "Feature work"
+        """
+        let url = try writeYAML(yaml, to: dir)
+
+        // First ingest: 1 promote + 1 insert of a new provisional = 2 changes.
+        // (The snapshot-sync fix makes this correct on the first pass rather than
+        // deferring the insert to a second pass.)
+        let first = try KnownTasksLoader.ingest(from: url, into: store)
+        XCTAssertEqual(first, 2, "first ingest: 1 promote + 1 provisional insert = 2 changes")
+
+        let allAfterFirst = try store.knownTasks(activeOnly: false)
+        XCTAssertEqual(allAfterFirst.count, 2, "two registry rows: promoted keyed entry + new provisional")
+        XCTAssertTrue(allAfterFirst.contains { $0.jiraKey == "PROJ-1" && !$0.provisional },
+                      "promoted row must carry PROJ-1 and be non-provisional")
+        XCTAssertTrue(allAfterFirst.contains { $0.provisional && $0.description == "Feature work" },
+                      "a separate provisional row must exist for the keyless YAML entry")
+
+        // Second ingest must return 0 — the state already matches the file.
+        let second = try KnownTasksLoader.ingest(from: url, into: store)
+        XCTAssertEqual(second, 0, "second ingest of same file must return 0 (idempotent)")
+
+        let allAfterSecond = try store.knownTasks(activeOnly: false)
+        XCTAssertEqual(allAfterSecond.count, 2, "no new rows created by idempotent second ingest")
+    }
+
+    // Scenario 2: double-promote without snapshot sync.
+    //
+    // Pre-seed a provisional "X". Ingest a file with two keyed entries that both
+    // match "X" by description but carry different keys: {PROJ-1, "X"} and
+    // {PROJ-2, "X"}. Without snapshot sync both entries find the same provisional
+    // row in the stale snapshot and emit two promote events for the same registry
+    // id — the second silently overwrites the first. With snapshot sync the first
+    // promote marks the row non-provisional in the local copy; the second entry
+    // finds no provisional match and inserts a SEPARATE keyed row for PROJ-2.
+    func testTwoKeyedEntriesSharingDescriptionDoNotDoublePromoteSameId() throws {
+        let dir = try makeTmpDir()
+        let store = try makeStore(in: dir)
+
+        // Pre-seed a provisional entry.
+        let provisional = try store.addKnownTask(jiraKey: nil, description: "Shared feature")
+        let provisionalId = try XCTUnwrap(provisional.id)
+
+        let yaml = """
+        known_tasks:
+          - jiraKey: PROJ-1
+            description: "Shared feature"
+          - jiraKey: PROJ-2
+            description: "Shared feature"
+        """
+        let url = try writeYAML(yaml, to: dir)
+
+        let count = try KnownTasksLoader.ingest(from: url, into: store)
+        XCTAssertEqual(count, 2, "one promote + one insert = 2 changes")
+
+        let all = try store.knownTasks(activeOnly: false)
+        XCTAssertEqual(all.count, 2, "exactly two distinct registry entries: promoted + new keyed")
+
+        // The original provisional row must be promoted to PROJ-1 (first match).
+        let promoted = try XCTUnwrap(all.first { $0.id == provisionalId })
+        XCTAssertFalse(promoted.provisional, "originally-provisional row must now be non-provisional")
+        XCTAssertEqual(promoted.jiraKey, "PROJ-1", "first keyed entry wins the promote")
+
+        // PROJ-2 must be a NEW, separate keyed row (different id).
+        let proj2 = try XCTUnwrap(all.first { $0.jiraKey == "PROJ-2" })
+        XCTAssertNotEqual(proj2.id, provisionalId, "PROJ-2 must be a distinct registry entry, not a double-promote on the same id")
+        XCTAssertFalse(proj2.provisional)
     }
 }

@@ -82,7 +82,17 @@ public enum KnownTasksLoader {
         // Effective registry (overlay applied), including retired, so matching
         // sees current jiraKey/provisional state and never re-inserts a promoted
         // or retired entry.
-        let existing = try store.knownTasks(activeOnly: false)
+        //
+        // Within-pass consistency: `existing` is kept in sync with every promote,
+        // insert, and description update performed in the loop. Without this,
+        // later entries in the same YAML file would match against stale state and
+        // produce incorrect outcomes — e.g. a provisional promoted earlier in the
+        // pass would still appear provisional to a subsequent keyless entry for the
+        // same description, causing a spurious re-insert on the next ingest
+        // (idempotency broken); or two keyed entries with the same description
+        // would each match the same provisional row and emit two promote events for
+        // the same registry id (double-promote).
+        var existing = try store.knownTasks(activeOnly: false)
 
         var changes = 0
         for entry in entries {
@@ -97,6 +107,11 @@ public enum KnownTasksLoader {
                 if let row = keyMatches.first {
                     if row.description != entry.description, let id = row.id {
                         _ = try store.updateKnownTaskDescription(id: id, description: entry.description)
+                        // Keep snapshot in sync: update this element's description so
+                        // a later entry matching by description sees the new value.
+                        if let idx = existing.firstIndex(where: { $0.id == id }) {
+                            existing[idx].description = entry.description
+                        }
                         changes += 1
                     }
                     continue
@@ -111,12 +126,21 @@ public enum KnownTasksLoader {
                 if let row = provMatches.first, let id = row.id {
                     // Append-only promote; the base row is never mutated.
                     _ = try store.promoteKnownTask(id: id, jiraKey: jiraKey)
+                    // Keep snapshot in sync: mark the row non-provisional with its
+                    // new key so subsequent entries don't re-match the same provisional
+                    // and attempt a second promote on the same registry id.
+                    if let idx = existing.firstIndex(where: { $0.id == id }) {
+                        existing[idx].jiraKey = jiraKey
+                        existing[idx].provisional = false
+                    }
                     changes += 1
                     continue
                 }
 
                 // 3. Brand new keyed entry.
-                _ = try store.addKnownTask(jiraKey: jiraKey, description: entry.description)
+                let inserted = try store.addKnownTask(jiraKey: jiraKey, description: entry.description)
+                // Keep snapshot in sync so later entries can match by key.
+                existing.append(inserted)
                 changes += 1
             } else {
                 // Provisional entry: identity is the description among provisional
@@ -128,7 +152,10 @@ public enum KnownTasksLoader {
                 if provMatches.first != nil {
                     continue   // already present — nothing to change
                 }
-                _ = try store.addKnownTask(jiraKey: nil, description: entry.description)
+                let inserted = try store.addKnownTask(jiraKey: nil, description: entry.description)
+                // Keep snapshot in sync so a later provisional entry with the same
+                // description is correctly recognised as already present.
+                existing.append(inserted)
                 changes += 1
             }
         }
