@@ -75,6 +75,10 @@ struct TaskRowView: View {
         .onChange(of: isActive) { _, active in
             if active { isHovered = false }
         }
+        // The icons are decorative; VoiceOver should read the task name (and
+        // elapsed-time annotation) only. The active/tracked state is conveyed
+        // via accessibilityValue so it remains perceivable without the icon.
+        .accessibilityValue(isActive ? "Tracking" : "")
     }
 
     // The leading indicator column.
@@ -91,12 +95,17 @@ struct TaskRowView: View {
             Image(systemName: "circle.fill")
                 .imageScale(.small)
                 .foregroundStyle(Color.accentColor)
+                // Decorative: active state is conveyed by the button's accessibilityValue.
+                .accessibilityHidden(true)
         } else {
             Image(systemName: "play.fill")
                 .imageScale(.small)
                 .foregroundStyle(Color.secondary)
                 .opacity(isHovered ? 1 : 0)
                 .animation(.easeInOut(duration: 0.12), value: isHovered)
+                // Decorative: opacity-0 at rest; hiding prevents VoiceOver announcing
+                // "Play" on every inactive row regardless of hover state.
+                .accessibilityHidden(true)
         }
     }
 }
