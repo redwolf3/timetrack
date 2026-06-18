@@ -80,21 +80,23 @@ struct TaskRowView: View {
     // The leading indicator column.
     // Active row: filled circle in accent colour — permanently visible, so the
     // running task is identifiable at a glance without hover.
-    // Inactive row: play triangle appears on hover, fades away at rest, keeping
-    // the list visually quiet while remaining discoverable as interactive.
+    // Inactive row: play triangle is always in the hierarchy at opacity 0 at rest
+    // and fades to 1 on hover. Keeping the same view identity (rather than
+    // swapping Image / Color.clear) lets SwiftUI animate the opacity transition
+    // smoothly instead of a hard swap. Layout width is identical in both states,
+    // so task names stay flush across all rows.
     @ViewBuilder
     private var startIndicator: some View {
         if isActive {
             Image(systemName: "circle.fill")
                 .imageScale(.small)
                 .foregroundStyle(Color.accentColor)
-        } else if isHovered {
+        } else {
             Image(systemName: "play.fill")
                 .imageScale(.small)
                 .foregroundStyle(Color.secondary)
-        } else {
-            // Reserve space so task names stay flush across all rows.
-            Color.clear
+                .opacity(isHovered ? 1 : 0)
+                .animation(.easeInOut(duration: 0.12), value: isHovered)
         }
     }
 }
