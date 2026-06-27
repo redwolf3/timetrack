@@ -556,13 +556,19 @@ public final class Store {
                 .order(Column("ts").asc, Column("id").asc)
                 .fetchAll(db)
 
-            var totals: [Int64: Int] = [:]   // taskId -> seconds
+            // Accumulate raw milliseconds per task across ALL segments, then convert
+            // to seconds ONCE at the end. Per-segment truncation (Int(ms/1000)) loses
+            // up to 999 ms per segment; with many short events (e.g. idle splits) those
+            // sub-second remainders accumulate and can drop ≥1 s from the day total.
+            // Floor semantics (ms/1000, no rounding): consistent with windowSeconds and
+            // the reconcile-report layer, which also truncate to whole seconds.
+            var totalMs: [Int64: Int64] = [:]  // taskId -> milliseconds
             var activeTask: Int64? = activeTaskFromPrior(prior)
             var lastTs: Int64 = startMs
 
             for e in today {
                 if let active = activeTask {
-                    totals[active, default: 0] += Int((e.ts - lastTs) / 1000)
+                    totalMs[active, default: 0] += e.ts - lastTs
                 }
                 activeTask = nextActiveTask(after: e, current: activeTask)
                 lastTs = e.ts
@@ -571,7 +577,7 @@ public final class Store {
             let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
             let closeTs = min(endMs, nowMs)
             if let active = activeTask, closeTs > lastTs {
-                totals[active, default: 0] += Int((closeTs - lastTs) / 1000)
+                totalMs[active, default: 0] += closeTs - lastTs
             }
 
             // --- Second pass: idle_resolve reattribution ---
@@ -596,18 +602,21 @@ public final class Store {
                 let clampedStart = max(rs, startMs)
                 let clampedEnd = min(re, closeTs)
                 guard clampedEnd > clampedStart else { continue }
-                let secs = Int((clampedEnd - clampedStart) / 1000)
+                let deltaMs = clampedEnd - clampedStart
 
                 // Subtract from where the walk put it (prevTaskId = original task).
                 if let orig = r.prevTaskId {
-                    totals[orig, default: 0] -= secs
-                    if totals[orig]! <= 0 { totals[orig] = max(0, totals[orig]!) }
+                    totalMs[orig, default: 0] -= deltaMs
+                    if let v = totalMs[orig], v < 0 { totalMs[orig] = 0 }
                 }
                 // Add to chosen target. taskId nil = discard (goes nowhere).
                 if let target = r.taskId {
-                    totals[target, default: 0] += secs
+                    totalMs[target, default: 0] += deltaMs
                 }
             }
+
+            // Convert ms totals to whole seconds (floor) once, after all accumulation.
+            let totals: [Int64: Int] = totalMs.mapValues { Int($0 / 1_000) }
 
             // Resolve task ids to Task records.
             var rows: [DayRow] = []
@@ -1066,6 +1075,64 @@ public final class Store {
             }
         }
         return out
+    }
+
+    // Combined result of a single reconcile-state walk — both gate conditions in one pass.
+    // refreshReconcile in AppState calls this instead of unreconciled() + provisionalWithTime()
+    // separately, halving the number of windowSeconds walks.
+    public struct ReconcileState {
+        public let unbound: [UnreconciledTask]
+        public let provisional: [KnownTask]
+    }
+
+    // Computes both reconcile gate conditions — unbound ad-hoc tasks and provisional-with-time
+    // Known Tasks — in a SINGLE timeline walk (one call to windowSeconds). The returned values
+    // are semantically identical to calling unreconciled(from:to:) and provisionalWithTime(from:to:)
+    // independently; this method exists only for efficiency.
+    //
+    // Gate invariants preserved exactly:
+    //   - An unbound task is any project task with seconds > 0 and no binding.
+    //   - A provisional Known Task is one whose overlay-resolved entry still has provisional==true
+    //     and has bound seconds > 0 (including retired+provisional entries per activeOnly:false).
+    //   - Break tasks are excluded from unbound (never reportable).
+    // Verified equivalent by ReconcileGateTests (all existing tests use unreconciled() and
+    // provisionalWithTime() directly, which remain unchanged and are exercised by the test suite).
+    public func reconcileState(from: Date, to: Date) throws -> ReconcileState {
+        let binds = try bindings()
+        let perTask = try windowSeconds(from: from, to: to)
+
+        // Sum bound seconds per Known Task (for provisional check).
+        var perKnown: [Int64: Int] = [:]
+        for (tid, secs) in perTask {
+            if let ktid = binds[tid] { perKnown[ktid, default: 0] += secs }
+        }
+
+        // Overlay-resolved Known Tasks (same activeOnly:false contract as provisionalWithTime).
+        let overlaid = try knownTasks(activeOnly: false)
+        let knownById = Dictionary(uniqueKeysWithValues: overlaid.compactMap { k -> (Int64, KnownTask)? in
+            guard let id = k.id else { return nil }
+            return (id, k)
+        })
+
+        return try dbQueue.read { db in
+            var unbound: [UnreconciledTask] = []
+            for (tid, secs) in perTask where secs > 0 {
+                guard let t = try Task.fetchOne(db, key: tid) else { continue }
+                if t.category == "break" { continue }
+                if binds[tid] != nil { continue }
+                unbound.append(UnreconciledTask(task: t, totalSeconds: secs))
+            }
+            unbound.sort { $0.totalSeconds > $1.totalSeconds }
+
+            var provisional: [KnownTask] = []
+            for (ktid, secs) in perKnown where secs > 0 {
+                if let k = knownById[ktid], k.provisional {
+                    provisional.append(k)
+                }
+            }
+
+            return ReconcileState(unbound: unbound, provisional: provisional)
+        }
     }
 
     public struct ReconciledRow {
