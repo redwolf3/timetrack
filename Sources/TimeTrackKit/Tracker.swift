@@ -360,6 +360,62 @@ public final class Tracker {
         activeTask = tasks.first(where: { $0.id == nextTaskId })
     }
 
+    // The phases of the current effective cycle, i.e. the valid manual-skip
+    // targets (#25). Empty while idle. The app builds its "Skip to ▸" menu from
+    // this; the CycleIterator stays private to the kit.
+    public var jumpTargets: [Phase] {
+        if case .idle = state { return [] }
+        return iterator?.jumpTargetPhases ?? []
+    }
+
+    // Manual phase skip (#25): end the current phase early and jump to a specific
+    // phase in the current effective cycle. Allowed from .tracking AND .armed;
+    // a no-op while idle or when the target isn't in this cycle (the override-only
+    // not-due case — deferred). Append-only: logs a phase_skip carrying the target
+    // phase id. Mirrors advance() for accrual (shared accrualTaskId + break-resume)
+    // so a manual jump can never diverge from a natural advance.
+    public func jumpToPhase(_ phaseId: String, comment: String? = nil) {
+        let currentTaskId: Int64
+        let leavingPhase: Phase
+        switch state {
+        case .idle:
+            return
+        case let .tracking(tid, phase, _):
+            currentTaskId = tid; leavingPhase = phase
+        case let .armed(tid, phase, _, _):
+            currentTaskId = tid; leavingPhase = phase
+        }
+        guard let iter = iterator else { return }
+
+        // Validate + move the iterator. An out-of-cycle target throws → no-op,
+        // leaving state untouched (the UI only ever offers valid targets).
+        guard let newPhase = try? iter.jumpTo(phaseId: phaseId) else { return }
+
+        let deadline = Date().addingTimeInterval(Double(newPhase.durationMin * 60))
+
+        // Resume target exists only when LEAVING a break: the carried task is
+        // often the synthetic break task, and carrying it into a work phase would
+        // silently drop time. Same guard as advance().
+        let prev: Int64? = (leavingPhase.accrueAs == "break")
+            ? (try? store.previousWorkTaskId(leavingBreak: leavingPhase, asOf: Date()))
+            : nil
+
+        let nextTaskId: Int64 = (try? store.accrualTaskId(
+            forNextPhase: newPhase,
+            carriedTaskId: currentTaskId,
+            previousWorkTaskId: prev)) ?? currentTaskId
+
+        try? store.append(Event(
+            id: nil, ts: 0, type: EventType.phaseSkip.rawValue,
+            taskId: nextTaskId, prevTaskId: currentTaskId,
+            phaseId: newPhase.id, profileName: profileName,
+            extendMin: nil, comment: comment))
+
+        phaseStartedAt = Date()
+        state = .tracking(taskId: nextTaskId, phase: newPhase, deadline: deadline)
+        activeTask = tasks.first(where: { $0.id == nextTaskId })
+    }
+
     public func extend(minutes: Int, comment: String? = nil) {
         guard case let .armed(taskId, phase, _, _) = state else { return }
         let deadline = Date().addingTimeInterval(Double(minutes * 60))
