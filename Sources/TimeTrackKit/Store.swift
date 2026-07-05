@@ -9,7 +9,7 @@ public enum EventType: String, Codable {
     case `switch`
     case phaseArm     = "phase_arm"
     case phaseAdvance = "phase_advance"
-    case phaseSkip    = "phase_skip"    // manual jump to a specific in-cycle phase (#25)
+    case phaseSkip    = "phase_skip"    // manual jump to a chosen phase: in-cycle, or an override-only phase forced early (#25)
     case phaseExtend  = "phase_extend"
     case profileChange = "profile_change"
     case interruption

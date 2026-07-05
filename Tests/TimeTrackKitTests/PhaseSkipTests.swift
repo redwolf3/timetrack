@@ -296,6 +296,33 @@ final class PhaseSkipTests: XCTestCase {
         }
     }
 
+    // Jumping to the phase we're ALREADY in is a no-op — otherwise a stale UI
+    // (or a direct API caller) turns it into an accidental phase restart: fresh
+    // deadline, reset phaseStartedAt, and a junk phase_skip in the append-only
+    // log. phaseStartedAt/deadline unchanged proves the early return (all
+    // mutations and the append live in the same block after the guard).
+    func testJumpToCurrentPhaseIsNoOp() throws {
+        try MainActor.assumeIsolated {
+            let (tracker, _, taskId) = try pomodoroTracker()
+            tracker.start(taskId: taskId)
+            guard case let .tracking(_, _, deadlineBefore) = tracker.state else {
+                return XCTFail("expected .tracking after start, got \(tracker.state)")
+            }
+            let startedBefore = tracker.phaseStartedAt
+
+            tracker.jumpToPhase("work")
+
+            guard case let .tracking(_, phase, deadlineAfter) = tracker.state else {
+                return XCTFail("expected still .tracking, got \(tracker.state)")
+            }
+            XCTAssertEqual(phase.id, "work")
+            XCTAssertEqual(deadlineAfter, deadlineBefore,
+                           "jump-to-current must not restart the phase deadline")
+            XCTAssertEqual(tracker.phaseStartedAt, startedBefore,
+                           "jump-to-current must not reset phaseStartedAt")
+        }
+    }
+
     // A phase in NEITHER the current cycle nor the override is a no-op — the
     // iterator rejects it and the tracker leaves state untouched.
     func testJumpToUnknownPhaseIsNoOp() throws {

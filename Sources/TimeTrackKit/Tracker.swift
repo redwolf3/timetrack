@@ -369,11 +369,14 @@ public final class Tracker {
     }
 
     // Manual phase skip (#25): end the current phase early and jump to a specific
-    // phase in the current effective cycle. Allowed from .tracking AND .armed;
-    // a no-op while idle or when the target isn't in this cycle (the override-only
-    // not-due case — deferred). Append-only: logs a phase_skip carrying the target
-    // phase id. Mirrors advance() for accrual (shared accrualTaskId + break-resume)
-    // so a manual jump can never diverge from a natural advance.
+    // phase — any phase in the current effective cycle, or an override-only phase
+    // forced early (e.g. long_break before its Nth cycle; the iterator then resets
+    // the long-cycle counter so the early break counts). Allowed from .tracking
+    // AND .armed; a no-op while idle, for a target in neither the cycle nor the
+    // override, or for the phase already running (see guard below). Append-only:
+    // logs a phase_skip carrying the target phase id. Mirrors advance() for
+    // accrual (shared accrualTaskId + break-resume) so a manual jump can never
+    // diverge from a natural advance.
     public func jumpToPhase(_ phaseId: String, comment: String? = nil) {
         let currentTaskId: Int64
         let leavingPhase: Phase
@@ -385,6 +388,12 @@ public final class Tracker {
         case let .armed(tid, phase, _, _):
             currentTaskId = tid; leavingPhase = phase
         }
+        // Jumping to the phase we're already in is a no-op, not a restart. The UI
+        // filters the current phase out of its menu, but the kit must not rely on
+        // that: a stale caller would otherwise reset the deadline and pollute the
+        // append-only log with a do-nothing phase_skip. "Restart current phase"
+        // is a distinct feature if ever wanted — not this API's job.
+        if leavingPhase.id == phaseId { return }
         guard let iter = iterator else { return }
 
         // Validate + move the iterator. An out-of-cycle target throws → no-op,

@@ -161,9 +161,11 @@ struct MenuBarPopoverView: View {
 
     // MARK: - Skip-to-phase
 
-    // "Skip to ▸" menu (#25): end the current phase early and jump to any phase in
-    // the current cycle. Shown only while active (jumpTargets non-empty). Selecting
-    // a phase calls the kit, which logs an append-only phase_skip.
+    // "Skip to ▸" menu (#25): end the current phase early and jump to any other
+    // phase in the current cycle — plus override-only phases forced early (e.g.
+    // long_break; the kit then resets the long-cycle counter). Shown only while
+    // active (jumpTargets non-empty; the current phase is filtered out upstream).
+    // Selecting a phase calls the kit, which logs an append-only phase_skip.
     private var skipToRow: some View {
         HStack {
             Menu("Skip to") {

@@ -149,10 +149,11 @@ final class CycleIterator {
         return phases[nextIndex]
     }
 
-    // Thrown when a jump target isn't part of the current effective cycle.
-    // The override-only phase that isn't due this cycle (e.g. forcing long_break
-    // early on a non-Nth cycle) lands here — a deferred case per issue #25, surfaced
-    // explicitly rather than silently no-op'd.
+    // Thrown when a jump target is reachable NEITHER from the current effective
+    // cycle NOR by forcing an override-only phase (jumpTo's force branch handles
+    // the latter — e.g. long_break early on a non-Nth cycle enters the override
+    // cycle and resets the counter). Only genuinely unknown/out-of-profile ids
+    // land here, surfaced explicitly rather than silently no-op'd.
     enum JumpError: Error, Equatable { case notInCurrentCycle(String) }
 
     // Manual phase skip (#25): jump straight to a phase in the CURRENT effective
