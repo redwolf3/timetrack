@@ -9,6 +9,7 @@ public enum EventType: String, Codable {
     case `switch`
     case phaseArm     = "phase_arm"
     case phaseAdvance = "phase_advance"
+    case phaseSkip    = "phase_skip"    // manual jump to a chosen phase: in-cycle, or an override-only phase forced early (#25)
     case phaseExtend  = "phase_extend"
     case profileChange = "profile_change"
     case interruption
@@ -638,6 +639,7 @@ public final class Store {
         switch EventType(rawValue: e.type) {
         case .start, .switch:     return e.taskId
         case .phaseAdvance:       return e.taskId    // may be break task
+        case .phaseSkip:          return e.taskId    // manual jump: target's accrual task
         case .stop:               return nil
         case .phaseArm,
              .phaseExtend,
@@ -1394,6 +1396,7 @@ public final class Store {
             EventType.stop.rawValue,
             EventType.switch.rawValue,
             EventType.phaseAdvance.rawValue,
+            EventType.phaseSkip.rawValue,
             EventType.phaseExtend.rawValue,
             EventType.phaseArm.rawValue,
         ]
@@ -1412,10 +1415,10 @@ public final class Store {
                       let task = try Task.fetchOne(db, key: tid) else { return .idle }
                 let since = try taskStartDate(for: tid, db: db)
                 return .armed(task: task, phase: last.phaseId ?? "work", since: since)
-            case .phaseAdvance:
-                // A phase_advance sets a new active task (often a break task that has no
-                // start/switch row). Derive 'since' from the phase_advance event's own ts
-                // — that is the moment the phase began. taskStartDate() would find no
+            case .phaseAdvance, .phaseSkip:
+                // A phase_advance / phase_skip sets a new active task (often a break
+                // task that has no start/switch row). Derive 'since' from the event's
+                // own ts — the moment the phase began. taskStartDate() would find no
                 // start/switch for the break task and fall back to now(), giving a
                 // misleading 0s elapsed.
                 guard let tid = last.taskId,

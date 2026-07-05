@@ -38,6 +38,11 @@ final class AppState: ObservableObject {
     // Armed boundary actions — non-empty only when state == .armed
     @Published var armedActions: [ArmAction] = []
 
+    // Manual phase-skip targets (#25): the current effective cycle's phases, used
+    // to build the "Skip to ▸" menu. Empty while idle (the menu hides). Identified
+    // by phase id in ForEach (Phase ids are unique within a cycle).
+    @Published var jumpTargets: [Phase] = []
+
     // Phase-progress display (#20). All derived in updatePublished + the 1 Hz
     // tick — never computed in the view (CLAUDE.md invariant 3).
     // cyclePositionLabel: "2/4" for cyclic profiles, "" when single-phase or idle.
@@ -272,6 +277,10 @@ final class AppState: ObservableObject {
         trackerState = state
         todaySeconds = tracker.todaySeconds
 
+        // The phase currently active — excluded from the "Skip to ▸" targets below
+        // (jumping to the phase you're already in is just a confusing restart).
+        var currentPhaseId: String? = nil
+
         switch state {
         case .idle:
             isActive = false
@@ -288,6 +297,7 @@ final class AppState: ObservableObject {
         case let .tracking(taskId, phase, deadline):
             isActive = true
             activeTaskId = taskId
+            currentPhaseId = phase.id
             activeTaskName = tracker.activeTask?.name ?? ""
             phaseLabel = phase.id.replacingOccurrences(of: "_", with: " ").capitalized
             armedActions = []
@@ -315,6 +325,7 @@ final class AppState: ObservableObject {
         case let .armed(taskId, phase, _, armedAt):
             isActive = true
             activeTaskId = taskId
+            currentPhaseId = phase.id
             activeTaskName = tracker.activeTask?.name ?? ""
             phaseLabel = phase.id.replacingOccurrences(of: "_", with: " ").capitalized + " (armed)"
             armedActions = phase.onArm.actions
@@ -337,6 +348,10 @@ final class AppState: ObservableObject {
             cyclePositionLabel = ""
         }
         recomputeProgress()
+
+        // Manual phase-skip targets follow the active cycle (empty while idle),
+        // minus the phase we're already in.
+        jumpTargets = tracker.jumpTargets.filter { $0.id != currentPhaseId }
 
         // Refresh task list and profiles from tracker (they change rarely).
         tasks = tracker.tasks.filter { $0.category != "break" }
@@ -454,6 +469,12 @@ final class AppState: ObservableObject {
 
     func stop() {
         tracker.stop()
+    }
+
+    // Manual phase skip (#25): jump to a specific phase in the current cycle.
+    // No-op in the kit when idle or for an out-of-cycle target.
+    func jumpToPhase(_ phaseId: String) {
+        tracker.jumpToPhase(phaseId)
     }
 
     func setProfile(_ name: String) {

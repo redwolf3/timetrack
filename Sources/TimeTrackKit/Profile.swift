@@ -149,6 +149,50 @@ final class CycleIterator {
         return phases[nextIndex]
     }
 
+    // Thrown when a jump target is reachable NEITHER from the current effective
+    // cycle NOR by forcing an override-only phase (jumpTo's force branch handles
+    // the latter — e.g. long_break early on a non-Nth cycle enters the override
+    // cycle and resets the counter). Only genuinely unknown/out-of-profile ids
+    // land here, surfaced explicitly rather than silently no-op'd.
+    enum JumpError: Error, Equatable { case notInCurrentCycle(String) }
+
+    // Manual phase skip (#25): jump straight to a phase in the CURRENT effective
+    // cycle. Moves the index only — cycleNumber and therefore the long-cycle
+    // override math are deliberately left untouched, so the cycle the user is in
+    // (and when the next long break is due) does not shift because they skipped a
+    // phase. Returns the new current phase; throws if the id isn't reachable.
+    @discardableResult
+    func jumpTo(phaseId: String) throws -> Phase {
+        // In-cycle jump: the target is part of the current effective cycle. Move
+        // the index only, leaving the long-cycle counter untouched.
+        let phases = phasesForCurrentCycle()
+        if let idx = phases.firstIndex(where: { $0.id == phaseId }) {
+            index = idx
+            return currentPhase
+        }
+
+        // Force an override-only phase (e.g. long_break) early — it lives in the
+        // long-cycle override, not in this base cycle. Per the #25 follow-up
+        // decision, taking the long break early "counts": enter the override cycle
+        // now AND reset the long-cycle counter so the next scheduled long break is
+        // a full `longCycleEvery` cycles away. Only cycleNumber % longCycleEvery is
+        // ever observed (the absolute value never surfaces), so setting it to
+        // longCycleEvery both makes THIS an override cycle and restarts the count.
+        if let every = profile.longCycleEvery,
+           let override = profile.longCycleOverride,
+           override.contains(where: { $0.id == phaseId }) {
+            cycleNumber = every
+            let overridePhases = phasesForCurrentCycle()   // now the override cycle
+            guard let idx = overridePhases.firstIndex(where: { $0.id == phaseId }) else {
+                throw JumpError.notInCurrentCycle(phaseId)
+            }
+            index = idx
+            return currentPhase
+        }
+
+        throw JumpError.notInCurrentCycle(phaseId)
+    }
+
     // Advance to the next phase. Returns the new current phase.
     func advance() -> Phase {
         let phases = phasesForCurrentCycle()
@@ -163,6 +207,20 @@ final class CycleIterator {
     func reset() {
         index = 0
         cycleNumber = 1
+    }
+
+    // All phases the user may jump to from here (#25): the current effective
+    // cycle's phases, PLUS any override-only phase (e.g. long_break) that can be
+    // forced early. Deduped by id, override phases appended after the base cycle.
+    // Read-only snapshot — does not mutate iterator state.
+    var jumpTargetPhases: [Phase] {
+        var result = phasesForCurrentCycle()
+        if profile.longCycleEvery != nil, let override = profile.longCycleOverride {
+            for phase in override where !result.contains(where: { $0.id == phase.id }) {
+                result.append(phase)
+            }
+        }
+        return result
     }
 
     // If this is the Nth cycle and an override exists, substitute its phases.

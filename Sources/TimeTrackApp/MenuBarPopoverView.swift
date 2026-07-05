@@ -35,9 +35,21 @@ struct MenuBarPopoverView: View {
 
             Divider()
 
+            // ── Stop (directly under the tracking bar, only while active) ───
+            if !appState.activeTaskName.isEmpty {
+                stopRow
+                Divider()
+            }
+
             // ── Armed actions (only when phase is armed) ───────────────────
             if !appState.armedActions.isEmpty {
                 armedActionsSection
+                Divider()
+            }
+
+            // ── Skip-to-phase (only while active) ──────────────────────────
+            if !appState.jumpTargets.isEmpty {
+                skipToRow
                 Divider()
             }
 
@@ -55,12 +67,6 @@ struct MenuBarPopoverView: View {
 
             // ── Ad-hoc task add row ────────────────────────────────────────
             adHocRow
-
-            // ── Stop button (only when tracking or armed) ──────────────────
-            if !appState.activeTaskName.isEmpty {
-                Divider()
-                stopRow
-            }
 
             // ── Profile picker ────────────────────────────────────────────────
             if appState.profiles.count > 1 {
@@ -153,6 +159,37 @@ struct MenuBarPopoverView: View {
         // This matches the kit's own behavior: Profile decoding ignores unknown fields.
     }
 
+    // MARK: - Skip-to-phase
+
+    // "Skip to ▸" menu (#25): end the current phase early and jump to any other
+    // phase in the current cycle — plus override-only phases forced early (e.g.
+    // long_break; the kit then resets the long-cycle counter). Shown only while
+    // active (jumpTargets non-empty; the current phase is filtered out upstream).
+    // Selecting a phase calls the kit, which logs an append-only phase_skip.
+    private var skipToRow: some View {
+        HStack {
+            Menu("Skip to") {
+                ForEach(appState.jumpTargets, id: \.id) { phase in
+                    Button(phaseDisplayName(phase.id)) {
+                        appState.jumpToPhase(phase.id)
+                    }
+                }
+            }
+            .menuStyle(.borderlessButton)
+            .controlSize(.small)
+            .fixedSize()
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+
+    // Human-readable phase label, matching AppState's phaseLabel formatting
+    // ("short_break" → "Short Break"; .capitalized uppercases every word).
+    private func phaseDisplayName(_ id: String) -> String {
+        id.replacingOccurrences(of: "_", with: " ").capitalized
+    }
+
     // MARK: - Ad-hoc task row
 
     private var adHocRow: some View {
@@ -206,13 +243,12 @@ struct MenuBarPopoverView: View {
 
     private var stopRow: some View {
         HStack {
-            Spacer()
-            Button("Stop") {
-                appState.stop()
+            Button(action: { appState.stop() }) {
+                Label("Stop tracking", systemImage: "stop.circle.fill")
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
-            .foregroundStyle(.red)
+            .tint(.red)
             Spacer()
         }
         .padding(.horizontal, 12)
