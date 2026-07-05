@@ -44,14 +44,15 @@ func monitorTick(
     phaseId: String = "work",
     armBoundary: Date? = nil,
     isBreakPhase: Bool = false,
-    breakTaskId: Int64 = 99
+    breakTaskId: Int64 = 99,
+    phaseArmedAt: Date? = nil
 ) -> IdleMonitor.Signal {
     source.set(idleSec)
     return monitor.tick(
         now: now, profile: profile,
         currentTaskId: taskId, currentPhaseId: phaseId,
         isBreakPhase: isBreakPhase, armBoundary: armBoundary,
-        breakTaskId: breakTaskId)
+        breakTaskId: breakTaskId, phaseArmedAt: phaseArmedAt)
 }
 
 // Build a Tracker + Store backed by a temp directory.
