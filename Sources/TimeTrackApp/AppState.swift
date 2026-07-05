@@ -191,6 +191,18 @@ final class AppState: ObservableObject {
                     Sounds.play(name)
                 case .postNotification(let title, let body):
                     await self.postNotification(title: title, body: body)
+                case .setIconColor(let color):
+                    // Escalation ramp (issue #24). Set the icon symbol+tint from
+                    // the rung colour. Persists until the next state transition
+                    // (updatePublished) re-derives the icon — e.g. when the user
+                    // acks the arm. Skip if no longer active to avoid overriding
+                    // the idle icon if a stray effect arrives after stop().
+                    await MainActor.run {
+                        guard self.isActive else { return }
+                        let (sym, col) = AppState.iconState(forColor: color)
+                        self.iconSymbol = sym
+                        self.iconColor = col
+                    }
                 }
             }
         }
@@ -373,7 +385,15 @@ final class AppState: ObservableObject {
     // SwiftUI Colors. This is the ONLY place profile color strings are interpreted
     // as visual state — it lives at the app boundary where SwiftUI is permitted.
     private func iconState(for phase: Phase) -> (String, Color) {
-        switch phase.onArm.color {
+        Self.iconState(forColor: phase.onArm.color)
+    }
+
+    // Color-string → (SF Symbol, SwiftUI Color). Shared by the armed-phase icon
+    // and the escalation .setIconColor effect (issue #24) so both interpret the
+    // same profile color vocabulary identically. The ONLY place these strings
+    // become visual state.
+    private static func iconState(forColor color: String) -> (String, Color) {
+        switch color {
         case "green_pulse":
             return ("checkmark.circle", .green)
         case "amber":

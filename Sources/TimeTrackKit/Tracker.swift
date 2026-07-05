@@ -144,20 +144,24 @@ public final class Tracker {
             let phaseId: String
             let isBreakPhase: Bool
             let armBoundary: Date?
+            let phaseArmedAt: Date?   // non-nil only while .armed; drives flowArm
 
             switch state {
             case .idle:
                 phaseId = ""
                 isBreakPhase = false
                 armBoundary = nil
+                phaseArmedAt = nil
             case let .tracking(_, phase, deadline):
                 phaseId = phase.id
                 isBreakPhase = phase.accrueAs == "break"
                 armBoundary = deadline
-            case let .armed(_, phase, _, _):
+                phaseArmedAt = nil
+            case let .armed(_, phase, _, armedAt):
                 phaseId = phase.id
                 isBreakPhase = phase.accrueAs == "break"
                 armBoundary = nil  // already armed; whole idle is overrun
+                phaseArmedAt = armedAt
             }
 
             // Detect the -1 "no break row" sentinel explicitly: if breakTaskId()
@@ -177,7 +181,8 @@ public final class Tracker {
                 currentPhaseId: phaseId,
                 isBreakPhase: isBreakPhase,
                 armBoundary: armBoundary,
-                breakTaskId: breakId)
+                breakTaskId: breakId,
+                phaseArmedAt: phaseArmedAt)
 
             switch signal {
             case .none:
@@ -206,6 +211,11 @@ public final class Tracker {
                 if let soundName = rung.sound {
                     effectContinuation.yield(.playSound(soundName))
                 }
+                // Ramp the menu-bar icon colour. For flowArm this is the visible
+                // half of its icon+sound cap; for idleReturn it tracks the ramp's
+                // severity. IdleMonitor already stripped notify on flowArm rungs,
+                // so the notify branch below can never fire for flowArm.
+                effectContinuation.yield(.setIconColor(rung.color))
                 // Per DESIGN.md: escalation ceiling is a persistent notification,
                 // never a focus-steal modal. Emit .postNotification when the rung
                 // requests it. The app posts via UNUserNotificationCenter; same

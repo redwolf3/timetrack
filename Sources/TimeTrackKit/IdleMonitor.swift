@@ -49,6 +49,15 @@ public final class IdleMonitor {
     private var wasIdle = false
     private var lastTickActive = true
 
+    // flowArm bookkeeping (issue #24). The "true flow" case: a phase has ARMED
+    // but the user never went idle, so there is no IdleEpisode. We ramp the
+    // flowArm curve presence-gated, identical gate to idleReturn. Identity of the
+    // current arm is its armedAt timestamp: a new arm (different timestamp) resets
+    // the ramp. nil = not armed.
+    private var flowArmedAt: Date?
+    private var flowActiveSeconds: TimeInterval = 0
+    private var flowLastRung: Int = -1
+
     // Returns an action for the Tracker to execute, if any.
     public enum Signal: Equatable {
         case none
@@ -66,7 +75,8 @@ public final class IdleMonitor {
                      currentPhaseId: String,
                      isBreakPhase: Bool,
                      armBoundary: Date?,
-                     breakTaskId: Int64) -> Signal {
+                     breakTaskId: Int64,
+                     phaseArmedAt: Date? = nil) -> Signal {
 
         let idleSec = source.idleSeconds()
         let threshold = Double((profile.idleThresholdMin ?? 5) * 60)
@@ -128,6 +138,55 @@ public final class IdleMonitor {
                     return .escalate(rung: curve[targetRung])
                 }
             }
+        }
+
+        // --- flowArm: presence-gated ramp while ARMED and never-idle (#24) ---
+        // Reached only when !nowIdle (the idle branches above return early). Runs
+        // only while a phase is armed (phaseArmedAt != nil) AND no idle episode is
+        // live — if the user went idle while armed, idleReturn owns escalation and
+        // flowArm pauses (its counter simply doesn't advance) until resolution.
+        guard let armedAt = phaseArmedAt else {
+            // Not armed → drop the ramp entirely. Resetting the counter and rung
+            // here (not just the identity) is defensive: the nil→non-nil check
+            // below already forces a restart on the next arm, but clearing all
+            // three keeps the "no ramp state outside an arm" invariant local
+            // instead of depending on that comparison.
+            flowArmedAt = nil
+            flowActiveSeconds = 0
+            flowLastRung = -1
+            return .none
+        }
+        if episode != nil { return .none }  // idle episode owns escalation; pause
+
+        // New arm? Restart the ramp. The armedAt timestamp is the arm's identity.
+        if flowArmedAt != armedAt {
+            flowArmedAt = armedAt
+            flowActiveSeconds = 0
+            flowLastRung = -1
+        }
+
+        // Same presence gate as idleReturn: accumulate only on recent activity.
+        let recentlyActive = idleSec < 5
+        if recentlyActive { flowActiveSeconds += 1 }
+
+        // Ramp over flowArm rungs with afterActiveSec > 0 only. Rung-0
+        // (afterActiveSec: 0) is subsumed by Tracker's onArm.sound arm cue, so
+        // firing it here would double the sound at arm — skip it.
+        let flowCurve = (profile.escalation ?? .default).flowArm
+        var flowTarget = -1
+        for (i, rung) in flowCurve.enumerated() where
+            rung.afterActiveSec > 0 && flowActiveSeconds >= Double(rung.afterActiveSec) {
+            flowTarget = i
+        }
+        if flowTarget > flowLastRung {
+            flowLastRung = flowTarget
+            // Cap at icon + sound: flowArm NEVER notifies (DESIGN.md Escalation).
+            // Strip notify/repeat structurally so the generic Tracker handler can
+            // never post a notification for a flowArm rung.
+            let r = flowCurve[flowTarget]
+            return .escalate(rung: EscalationRung(
+                afterActiveSec: r.afterActiveSec, sound: r.sound,
+                color: r.color, notify: false, repeatNotifySec: nil))
         }
 
         return .none
