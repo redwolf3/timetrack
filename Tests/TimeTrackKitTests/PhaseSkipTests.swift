@@ -190,8 +190,14 @@ final class PhaseSkipTests: XCTestCase {
         let work = try makeTask(store, "Work")
         let brk  = try makeTask(store, "Break")
 
-        let day = Date()
-        let base = Int64(day.timeIntervalSince1970 * 1000) - 1_200_000  // 20 min ago
+        // Anchor at NOON of a fixed past day, not "now − 20 min": a run shortly
+        // after midnight puts part of the window on yesterday, and report(day:)
+        // clips at the day boundary (CI caught 559 ≠ 600 at 00:19 UTC). Same
+        // fixed-past-day pattern as ReconcileGateTests (#44).
+        let cal = Calendar.current
+        let day = cal.date(byAdding: .day, value: -3, to: cal.startOfDay(for: Date()))!
+            .addingTimeInterval(12 * 3600)
+        let base = Int64(day.timeIntervalSince1970 * 1000)
         _ = try store.append(Event(
             id: nil, ts: base, type: EventType.start.rawValue,
             taskId: work.id, prevTaskId: nil, phaseId: "work",
