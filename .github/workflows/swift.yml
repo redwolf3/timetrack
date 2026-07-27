@@ -35,7 +35,19 @@ jobs:
       - name: Build timetrack CLI
         run: swift build --target timetrack-cli
 
-      # swift test builds TimeTrackKitTests (+ its TimeTrackKit dep) and runs
-      # all test cases.  It does NOT build TimeTrackApp or timetrack-cli.
+      # swift test builds TimeTrackKitTests and TimeTrackCLICoreTests (+ their
+      # TimeTrackKit/TimeTrackCLICore deps) and runs all test cases.  It does
+      # NOT build TimeTrackApp or timetrack-cli.
+      # --enable-code-coverage instruments the run for the summary step below.
       - name: Run tests
-        run: swift test
+        run: swift test --enable-code-coverage
+
+      # Coverage TREND line for the kit (#56). Deliberately not a gate: no
+      # threshold, never fails the build. Glance at "KIT COVERAGE" across PRs
+      # to spot regressions. App target excluded (SwiftUI bodies inflate the
+      # denominator; the app layer holds no business logic).
+      # continue-on-error keeps this trend-only: a broken summary (missing
+      # profdata, llvm-cov drift) must never fail an otherwise-green build.
+      - name: Coverage summary
+        continue-on-error: true
+        run: bash tools/coverage-summary.sh
