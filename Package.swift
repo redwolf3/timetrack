@@ -43,8 +43,7 @@ let package = Package(
             dependencies: [
                 "TimeTrackKit",
                 .product(name: "HotKey", package: "HotKey")
-            ],
-            exclude: ["PHASE5_PLAN.md"]),
+            ]),
         // Importable CLI command logic (testable). Platform-agnostic like the
         // kit it wraps: Foundation + TimeTrackKit only, no AppKit/SwiftUI.
         .target(
