@@ -266,7 +266,7 @@ public final class Tracker {
                 // Losing an idle_resolve would lose the correction itself, which
                 // is why that path refuses to mark the segment resolved.
                 if let taskId {
-                    try? store.append(Event(
+                    _ = try? store.append(Event(
                         id: nil,
                         ts: Int64(start.timeIntervalSince1970 * 1000),
                         type: EventType.idleGap.rawValue,
@@ -395,7 +395,7 @@ public final class Tracker {
         let phase = iterator!.currentPhase
         let deadline = Date().addingTimeInterval(Double(phase.durationMin * 60))
 
-        try? store.append(Event(
+        _ = try? store.append(Event(
             id: nil, ts: 0, type: EventType.start.rawValue,
             taskId: taskId, prevTaskId: nil,
             phaseId: phase.id, profileName: prof.name,
@@ -411,7 +411,7 @@ public final class Tracker {
         case .idle:
             start(taskId: taskId)
         case let .tracking(prev, phase, deadline):
-            try? store.append(Event(
+            _ = try? store.append(Event(
                 id: nil, ts: 0, type: EventType.switch.rawValue,
                 taskId: taskId, prevTaskId: prev,
                 phaseId: phase.id, profileName: profileName,
@@ -427,7 +427,7 @@ public final class Tracker {
             // otherwise). A -1 sentinel would violate the events.prevTaskId FK
             // and the throw would be swallowed by try?.
             if case let .tracking(prev, phase, deadline) = state {
-                try? store.append(Event(
+                _ = try? store.append(Event(
                     id: nil, ts: 0, type: EventType.switch.rawValue,
                     taskId: taskId, prevTaskId: prev,
                     phaseId: phase.id, profileName: profileName,
@@ -440,7 +440,7 @@ public final class Tracker {
 
     public func stop() {
         if case .idle = state { return }
-        try? store.append(Event(
+        _ = try? store.append(Event(
             id: nil, ts: 0, type: EventType.stop.rawValue,
             taskId: nil, prevTaskId: currentTaskId(),
             phaseId: nil, profileName: profileName,
@@ -475,7 +475,7 @@ public final class Tracker {
         // the next phase without reconstructing the iterator's cycle-number state.
         let nextPhase = iter.peekNext()
 
-        try? store.append(Event(
+        _ = try? store.append(Event(
             id: nil, ts: 0, type: EventType.phaseArm.rawValue,
             taskId: taskId, prevTaskId: nil,
             phaseId: phase.id, profileName: profileName,
@@ -512,7 +512,7 @@ public final class Tracker {
             carriedTaskId: taskId,
             previousWorkTaskId: prev)) ?? taskId
 
-        try? store.append(Event(
+        _ = try? store.append(Event(
             id: nil, ts: 0, type: EventType.phaseAdvance.rawValue,
             taskId: nextTaskId, prevTaskId: taskId,
             phaseId: newPhase.id, profileName: profileName,
@@ -577,7 +577,7 @@ public final class Tracker {
             carriedTaskId: currentTaskId,
             previousWorkTaskId: prev)) ?? currentTaskId
 
-        try? store.append(Event(
+        _ = try? store.append(Event(
             id: nil, ts: 0, type: EventType.phaseSkip.rawValue,
             taskId: nextTaskId, prevTaskId: currentTaskId,
             phaseId: newPhase.id, profileName: profileName,
@@ -592,7 +592,7 @@ public final class Tracker {
         guard case let .armed(taskId, phase, _, _) = state else { return }
         let deadline = Date().addingTimeInterval(Double(minutes * 60))
 
-        try? store.append(Event(
+        _ = try? store.append(Event(
             id: nil, ts: 0, type: EventType.phaseExtend.rawValue,
             taskId: taskId, prevTaskId: nil,
             phaseId: phase.id, profileName: profileName,
@@ -612,7 +612,7 @@ public final class Tracker {
 
     public func setProfile(_ name: String) {
         guard profiles.contains(where: { $0.name == name }), name != profileName else { return }
-        try? store.append(Event(
+        _ = try? store.append(Event(
             id: nil, ts: 0, type: EventType.profileChange.rawValue,
             taskId: nil, prevTaskId: nil,
             phaseId: nil, profileName: name,
@@ -629,7 +629,7 @@ public final class Tracker {
     }
 
     public func logInterruption(comment: String) {
-        try? store.append(Event(
+        _ = try? store.append(Event(
             id: nil, ts: 0, type: EventType.interruption.rawValue,
             taskId: currentTaskId(), prevTaskId: nil,
             phaseId: nil, profileName: profileName,
