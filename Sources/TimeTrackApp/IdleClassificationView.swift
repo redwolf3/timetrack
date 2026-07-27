@@ -62,8 +62,10 @@ private struct IdleSegmentRowView: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
 
-                // Omitted entirely when the registry has no break task — offering
-                // a choice that cannot be honoured would be worse than not offering it.
+                // Omitted when the choice is unhonourable (no break row in the
+                // registry) or redundant (the segment already accrued to break,
+                // so Keep and Break would do the same thing) — AppState owns both
+                // conditions; see rebuildIdleSegmentItems.
                 if item.offersBreak {
                     Button("Break") {
                         appState.resolveIdleSegment(item.id, as: .toBreak)

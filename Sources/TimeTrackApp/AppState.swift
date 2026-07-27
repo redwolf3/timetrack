@@ -575,7 +575,18 @@ final class AppState: ObservableObject {
                 durationLabel: formatDuration(Int(seg.end.timeIntervalSince(seg.start))),
                 kindLabel: Self.kindLabel(for: seg.kind),
                 originalTaskName: name,
-                offersBreak: canBreak,
+                // Break is offered only for segments that did NOT originate in a
+                // break phase. During a break phase the accruing task already IS
+                // the synthetic break task, so buildSegments sets originalTaskId
+                // to it — .toBreak would resolve to the same id as
+                // .keepOnOriginal and write an identical net-zero idle_resolve.
+                // Two buttons, one effect ("Keep on Break" / "Break"), is noise.
+                // The kit stays permissive (a net-zero resolve is harmless); this
+                // is the app's gate. Segments that can reach here in that state:
+                // the overrun half of a break episode, and the single-segment
+                // collapse when the phase armed before idle began — the break
+                // inPhase half auto-resolves at build time and never prompts.
+                offersBreak: canBreak && !seg.wasBreakPhase,
                 moveTargets: targets)
         }
         if items != pendingIdleSegments { pendingIdleSegments = items }
