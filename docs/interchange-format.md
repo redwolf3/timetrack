@@ -75,6 +75,22 @@ worklog row's `date` is the local day the time was worked, not a UTC day.
 a JSON `null` mean the same thing. There is no sentinel string (never `"NULL"`,
 never `"-"`).
 
+This equivalence is only unambiguous because **no field in this format treats
+the empty string as a distinct, meaningful value**, and every field is either
+nullable or guaranteed non-empty. Specifically:
+
+- `description` is never empty — the registry rejects an empty or
+  whitespace-only description at ingest.
+- `jira_key` is never the empty string — a whitespace-only key is treated as
+  absent, i.e. `null`, i.e. provisional.
+- `capture_tasks` is **non-null and never empty**: a worklog record always
+  derives from at least one capture task. An empty cell in that column is a
+  malformed file, not an empty list. There is therefore no null-vs-empty-list
+  ambiguity to resolve.
+
+A future field that genuinely needs to distinguish `null` from `""` cannot use
+the CSV encoding as specified and would require a version bump.
+
 **Booleans.** JSON `true`/`false`. CSV lowercase `true`/`false`.
 
 ### 3.1 JSON encoding
@@ -114,8 +130,27 @@ Columns must appear in the documented order. Extra trailing columns are ignored
 with a warning (so a user can annotate an exported file and re-import it).
 
 **List-valued fields** (only `capture_tasks` today) are encoded in CSV as a
-single cell of `;`-separated values: `widget spike;widget`. A `;` inside a task
-name is escaped as `\;`. In JSON the same field is a real array.
+single cell of `;`-separated values: `widget spike;widget`. In JSON the same
+field is a real array.
+
+Escaping inside such a cell uses backslash, and **both escapes are required** or
+the encoding is not lossless:
+
+| Literal character | Encoded as |
+|---|---|
+| `;` | `\;` |
+| `\` | `\\` |
+
+A decoder scans left to right; a backslash always consumes exactly the next
+character. Without `\\`, a task name containing the two characters `\;` would
+encode identically to one containing a literal `;`, and could not round-trip.
+Task names are free-form user input created by typing into the popover or
+`timetrack start`, so neither character can be assumed absent. A trailing lone
+backslash is a malformed cell.
+
+The outer RFC 4180 quoting is independent of and applied after this: a cell
+containing a comma or quote is quoted as normal, and backslashes are **not**
+special to the CSV layer itself.
 
 ---
 
