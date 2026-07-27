@@ -275,7 +275,7 @@ final class IdleClassificationTests: XCTestCase {
     func testBreakInPhaseAutoResolvesAndASecondEpisodeCanStillOpen() throws {
         let ctx = try MainActor.assumeIsolated { try makeCtx() }
 
-        try MainActor.assumeIsolated {
+        MainActor.assumeIsolated {
             // pomodoro has a 5-min short_break phase with accrueAs: break.
             ctx.tracker.setProfile("pomodoro")
             ctx.tracker.start(taskId: ctx.taskA)
@@ -649,7 +649,7 @@ final class IdleClassificationTests: XCTestCase {
         let breakId = try ctx.store.breakTaskId()
         XCTAssertNotEqual(breakId, -1, "the store seeds a synthetic break task")
 
-        let overrun: IdleSegment? = try MainActor.assumeIsolated { () -> IdleSegment? in
+        let overrun: IdleSegment? = MainActor.assumeIsolated { () -> IdleSegment? in
             ctx.tracker.setProfile("pomodoro")
             ctx.tracker.start(taskId: ctx.taskA)
             ctx.tracker.jumpToPhase("short_break")      // 5-min phase, accrueAs: break

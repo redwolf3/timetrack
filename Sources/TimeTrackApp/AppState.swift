@@ -170,7 +170,7 @@ final class AppState: ObservableObject {
             let center = UNUserNotificationCenter.current()
             let settings = await center.notificationSettings()
             guard settings.authorizationStatus == .notDetermined else { return }
-            try? await center.requestAuthorization(options: [.alert])
+            _ = try? await center.requestAuthorization(options: [.alert])
         }
     }
 
@@ -758,7 +758,7 @@ final class AppState: ObservableObject {
     func reconcilePromote(id: Int64, jiraKey: String) {
         let trimmed = jiraKey.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
-        try? store.promoteKnownTask(id: id, jiraKey: trimmed)
+        _ = try? store.promoteKnownTask(id: id, jiraKey: trimmed)
         refreshReconcile()
     }
 
