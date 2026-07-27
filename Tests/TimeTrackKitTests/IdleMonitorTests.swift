@@ -22,7 +22,7 @@ final class IdleMonitorTests: XCTestCase {
         }
 
         XCTAssertEqual(sig, .none)
-        MainActor.assumeIsolated { XCTAssertNil(monitor.episode) }
+        MainActor.assumeIsolated { XCTAssertTrue(monitor.episodes.isEmpty) }
     }
 
     func testIdleAtThresholdOpensEpisode() {
@@ -35,7 +35,7 @@ final class IdleMonitorTests: XCTestCase {
         }
 
         if case .idleDetected = sig {} else { XCTFail("Expected .idleDetected, got \(sig)") }
-        MainActor.assumeIsolated { XCTAssertNotNil(monitor.episode) }
+        MainActor.assumeIsolated { XCTAssertEqual(monitor.episodes.count, 1) }
     }
 
     // The episode's idleStart must equal `now − idleSeconds`, not detection time.
@@ -189,7 +189,7 @@ final class IdleMonitorTests: XCTestCase {
         XCTAssertEqual(unresolved[0].kind, .overrun)
 
         // Verify the raw episode holds both segments, with inPhase already resolved.
-        let allSegs = MainActor.assumeIsolated { monitor.episode?.segments ?? [] }
+        let allSegs = MainActor.assumeIsolated { monitor.episodes.first?.segments ?? [] }
         XCTAssertEqual(allSegs.count, 2)
         XCTAssertTrue(allSegs[0].resolved,  "inPhase in break phase must be auto-resolved")
         XCTAssertFalse(allSegs[1].resolved, "overrun must require explicit user resolution")
@@ -236,7 +236,7 @@ final class IdleMonitorTests: XCTestCase {
             }
         }
 
-        let counter = MainActor.assumeIsolated { monitor.episode?.activeSecondsSinceReturn ?? -1 }
+        let counter = MainActor.assumeIsolated { monitor.episodes.first?.activeSecondsSinceReturn ?? -1 }
         XCTAssertEqual(counter, 1.0,
                        "activeSecondsSinceReturn must not advance during idle ticks")
     }

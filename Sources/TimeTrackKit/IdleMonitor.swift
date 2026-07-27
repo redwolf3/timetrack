@@ -19,6 +19,21 @@ public struct IdleSegment: Identifiable, Equatable {
     public var minutes: Int { Int(end.timeIntervalSince(start) / 60) }
 }
 
+// The four classifications DESIGN.md gives an idle segment. Modelled as an enum
+// rather than an `Int64?` target because "nil means discard" is a rule that has
+// to be re-explained everywhere it travels, and because the four choices are a
+// closed set the compiler should enforce at every switch.
+//
+// Resolving keep/break to a concrete task id is the KIT's job (Tracker), not the
+// caller's: the app must not have to know which task the segment came from or
+// which row is the synthetic break task.
+public enum IdleResolution: Equatable {
+    case keepOnOriginal        // leave the time on the task that was accruing
+    case toBreak               // reattribute to the synthetic break task
+    case moveTo(taskId: Int64) // reattribute to some other task
+    case discard               // remove from the original, credit nobody
+}
+
 // Tracks a single idle episode from detection through full resolution.
 public final class IdleEpisode {
     public let idleStart: Date
@@ -45,9 +60,41 @@ public final class IdleMonitor {
     private let source: IdleSource
     public init(source: IdleSource) { self.source = source }
 
-    public private(set) var episode: IdleEpisode?
+    // Every episode that still matters, oldest first. An episode leaves this list
+    // only when all of its segments are resolved (or when a still-open one is
+    // discarded by stop()).
+    //
+    // Why a LIST and not a single episode: an unresolved episode legitimately
+    // stays outstanding for as long as the user ignores the prompt — possibly
+    // hours. With a single slot, the next idle window (lunch, a meeting) would
+    // find the slot occupied and be silently swallowed, accruing to whatever task
+    // was active. That is the very misattribution #61 exists to stop.
+    //
+    // INVARIANT: at most ONE episode is live (returnTime == nil), and it is always
+    // the last one — a new episode only opens when none is live, and episodes are
+    // appended in time order. So episodes never overlap in time, which is what
+    // makes cross-episode segment disjointness automatic (the two-segments-max
+    // rule stays a per-episode property).
+    public private(set) var episodes: [IdleEpisode] = []
     private var wasIdle = false
     private var lastTickActive = true
+
+    // The episode currently in progress (user still away), if any.
+    private var liveEpisode: IdleEpisode? {
+        guard let last = episodes.last, last.returnTime == nil else { return nil }
+        return last
+    }
+
+    // Every segment still awaiting a user decision, in time order.
+    public var pendingSegments: [IdleSegment] {
+        episodes.flatMap { $0.unresolvedSegments }
+    }
+
+    // Episodes the user has returned from that still owe a decision, oldest first.
+    // The oldest owns escalation: it has been nagging longest.
+    private var outstandingEpisodes: [IdleEpisode] {
+        episodes.filter { $0.returnTime != nil && !$0.fullyResolved }
+    }
 
     // flowArm bookkeeping (issue #24). The "true flow" case: a phase has ARMED
     // but the user never went idle, so there is no IdleEpisode. We ramp the
@@ -85,10 +132,12 @@ public final class IdleMonitor {
         let nowIdle = idleSec >= effectiveThreshold
 
         // --- Episode open ---
-        if nowIdle && episode == nil, let taskId = currentTaskId {
+        // Gated on "no LIVE episode", not "no episodes at all": earlier episodes
+        // awaiting classification must not block detection of a new idle window.
+        if nowIdle, liveEpisode == nil, currentTaskId != nil {
             // Idle began at now - idleSec, not now.
             let start = now.addingTimeInterval(-idleSec)
-            episode = IdleEpisode(idleStart: start)
+            episodes.append(IdleEpisode(idleStart: start))
             wasIdle = true
             return .idleDetected(start: start)
         }
@@ -97,7 +146,7 @@ public final class IdleMonitor {
         if nowIdle { return .none }
 
         // --- Return detected (was idle, now active) ---
-        if wasIdle, let ep = episode, ep.returnTime == nil,
+        if wasIdle, let ep = liveEpisode,
            let taskId = currentTaskId {
             ep.returnTime = now
             ep.segments = buildSegments(
@@ -108,14 +157,32 @@ public final class IdleMonitor {
                 isBreakPhase: isBreakPhase,
                 breakTaskId: breakTaskId)
             wasIdle = false
-            return .returned(segments: ep.unresolvedSegments)
+            let unresolved = ep.unresolvedSegments
+            // Drop the episode when nothing needs a user decision (the only case
+            // today: a single break-phase inPhase segment, auto-resolved at build
+            // time). resolveSegment() is what normally retires a finished episode,
+            // but nobody will ever call it for a segment that was never pending —
+            // so without this the episode would leak forever and permanently
+            // suppress the flowArm ramp.
+            // Emits NO idle_resolve: the base timeline walk already attributed the
+            // interval to the break task, so there is nothing to correct.
+            if ep.fullyResolved { episodes.removeAll { $0 === ep } }
+            return .returned(segments: unresolved)
         }
 
         // --- Escalation while present with unresolved segments ---
-        if let ep = episode, !ep.fullyResolved, ep.returnTime != nil {
+        let outstanding = outstandingEpisodes
+        if let ep = outstanding.first {
             // Presence gate: only accumulate active time when input is recent.
             let recentlyActive = idleSec < 5
-            if recentlyActive { ep.activeSecondsSinceReturn += 1 }
+            // EVERY outstanding episode accrues presence time, not just the one
+            // currently escalating. When the oldest is finally resolved the next
+            // takes over with the time it has already spent waiting, rather than
+            // restarting the ramp from zero and giving the user a free reprieve
+            // for each additional unclassified gap.
+            if recentlyActive {
+                for e in outstanding { e.activeSecondsSinceReturn += 1 }
+            }
 
             let curve = (profile.escalation ?? .default).idleReturn
             // Find highest rung whose threshold we've crossed.
@@ -126,6 +193,12 @@ public final class IdleMonitor {
             }
             if targetRung > ep.lastRungFired {
                 ep.lastRungFired = targetRung
+                // Stamp the cue time here too. Without it the ceiling rung
+                // double-fires: this branch returns with lastNotifyAt still nil,
+                // and one tick later the cadence branch below reads nil as "never
+                // notified" and re-fires the same rung a second after the first.
+                // The cadence must count from the last cue actually delivered.
+                ep.lastNotifyAt = now
                 return .escalate(rung: curve[targetRung])
             }
             // Ceiling: repeat notification on cadence.
@@ -156,7 +229,8 @@ public final class IdleMonitor {
             flowLastRung = -1
             return .none
         }
-        if episode != nil { return .none }  // idle episode owns escalation; pause
+        // Any live-or-unresolved episode means idleReturn owns escalation; pause.
+        if !episodes.isEmpty { return .none }
 
         // New arm? Restart the ramp. The armedAt timestamp is the arm's identity.
         if flowArmedAt != armedAt {
@@ -192,24 +266,48 @@ public final class IdleMonitor {
         return .none
     }
 
-    // Discard any in-flight episode and reset idle state. Call this from
-    // Tracker.stop() so a stale episode opened during one session cannot bleed into
-    // the next. Once the session ends there is no task to attribute the idle time to,
-    // so the episode is definitionally unresolvable and must be discarded.
-    public func reset() {
-        episode = nil
+    // Discard the STILL-OPEN episode (if any) and reset idle state. Called from
+    // Tracker.stop().
+    //
+    // Only the open one: it has no returnTime, so its end — and therefore its
+    // segments — are unknown, making it definitionally unclassifiable once the
+    // session ends. Episodes the user has already returned from keep their
+    // unresolved segments and stay resolvable after stop: their ranges and
+    // originalTaskId are fully determined, so silently dropping them would bill
+    // that idle time to the original task, and would make Stop an escape hatch
+    // from the escalation ramp.
+    public func discardOpenEpisode() {
+        episodes.removeAll { $0.returnTime == nil }
         wasIdle = false
     }
 
     public func resolveSegment(_ id: UUID) {
-        guard let ep = episode else { return }
-        if let idx = ep.segments.firstIndex(where: { $0.id == id }) {
-            ep.segments[idx].resolved = true
+        for ep in episodes {
+            if let idx = ep.segments.firstIndex(where: { $0.id == id }) {
+                ep.segments[idx].resolved = true
+                break
+            }
         }
-        if ep.fullyResolved { episode = nil }   // episode done, escalation stops
+        // Retire finished episodes so escalation stops and the flowArm ramp can
+        // resume. Guarded on returnTime: a LIVE episode has no segments yet, and
+        // allSatisfy over an empty list is vacuously true — without the guard we
+        // would delete the episode currently in progress.
+        episodes.removeAll { $0.returnTime != nil && $0.fullyResolved }
     }
 
     // Two-segment split per locked design.
+    //
+    // INVARIANT: this emits AT MOST TWO segments, and they are disjoint and
+    // contiguous — [idleStart, boundary] then [boundary, now], sharing the single
+    // boundary instant. This is not cosmetic. Each unresolved segment becomes one
+    // idle_resolve carrying its [rangeStart, rangeEnd], and Store.sliceTimeline
+    // step 4 (Store.swift:975-1000) reattributes by testing each timeline
+    // segment's MIDPOINT against those ranges, first match wins. Overlapping
+    // ranges would therefore double-attribute (or silently drop) time depending
+    // on row order. The two append paths below are what structurally guarantees
+    // it: one branch appends exactly two segments meeting at `b`, the other
+    // exactly one covering the whole episode. Keep it that way — finer
+    // sub-segmentation (#32) must preserve disjointness.
     private func buildSegments(episode ep: IdleEpisode,
                                now: Date,
                                armBoundary: Date?,
@@ -219,11 +317,10 @@ public final class IdleMonitor {
                                breakTaskId: Int64) -> [IdleSegment] {
         var segs: [IdleSegment] = []
 
-        // armBoundary nil => phase was already armed when idle began =>
-        // whole episode is overrun, inPhase collapses.
-        let boundary = armBoundary
-
-        if let b = boundary, b > ep.idleStart, b < now {
+        // armBoundary is the freeze boundary if the caller knows one: the deadline
+        // while .tracking, or armedAt while .armed. nil means "no boundary known",
+        // which the collapse branch below treats as already-armed.
+        if let b = armBoundary, b > ep.idleStart, b < now {
             // inPhase: [idleStart, boundary]
             var s1 = IdleSegment(
                 kind: .inPhase, start: ep.idleStart, end: b,
@@ -242,9 +339,21 @@ public final class IdleMonitor {
                 originalTaskId: taskId,   // overrun's "was working?" target
                 phaseId: phaseId, wasBreakPhase: isBreakPhase))
         } else {
-            // No boundary crossed (returned before arm) OR already armed.
-            // Single segment covering the whole idle.
-            let kind: IdleSegment.Kind = (boundary == nil) ? .overrun : .inPhase
+            // The boundary is outside the episode, so it cannot split it — one
+            // segment covering the whole idle. Which kind depends on WHICH side
+            // it fell on:
+            //   boundary == nil          → no boundary known → overrun
+            //   boundary <= idleStart    → already armed before idle began; the
+            //                              user was past the boundary the whole
+            //                              time → overrun
+            //   boundary >= now          → returned before the phase ever armed;
+            //                              the idle sat entirely inside the phase
+            //                              → inPhase (and auto-resolves on break)
+            // Getting the middle case wrong is not cosmetic: labelling it
+            // .inPhase would let the break auto-resolve swallow overrun time that
+            // the user must actually classify.
+            let kind: IdleSegment.Kind =
+                (armBoundary.map { $0 <= ep.idleStart } ?? true) ? .overrun : .inPhase
             var s = IdleSegment(
                 kind: kind, start: ep.idleStart, end: now,
                 originalTaskId: isBreakPhase ? breakTaskId : taskId,
