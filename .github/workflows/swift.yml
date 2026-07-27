@@ -35,8 +35,9 @@ jobs:
       - name: Build timetrack CLI
         run: swift build --target timetrack-cli
 
-      # swift test builds TimeTrackKitTests (+ its TimeTrackKit dep) and runs
-      # all test cases.  It does NOT build TimeTrackApp or timetrack-cli.
+      # swift test builds TimeTrackKitTests and TimeTrackCLICoreTests (+ their
+      # TimeTrackKit/TimeTrackCLICore deps) and runs all test cases.  It does
+      # NOT build TimeTrackApp or timetrack-cli.
       # --enable-code-coverage instruments the run for the summary step below.
       - name: Run tests
         run: swift test --enable-code-coverage

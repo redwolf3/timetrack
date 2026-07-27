@@ -52,7 +52,14 @@ else
 fi
 
 # Everything except the two logic targets is ignored (regex on file paths).
-IGNORE='(Tests/|\.build/|Sources/TimeTrackApp/|Sources/timetrack-cli/|Sources/SQLiteSnapshotStubs/)'
+# The three excluded-target alternatives omit the "Sources/" prefix on
+# purpose: llvm-cov's report table strips whatever leading path segments are
+# common to the surviving rows before printing (that's why CI logs show
+# "TimeTrackKit/Store.swift", not "Sources/TimeTrackKit/Store.swift") — but
+# -ignore-filename-regex matches against the full underlying path, which
+# does carry the "Sources/" prefix. Matching the bare target-name segment
+# works under either form without needing to anchor the pattern.
+IGNORE='(Tests/|\.build/|TimeTrackApp/|timetrack-cli/|SQLiteSnapshotStubs/)'
 
 REPORT="$("${LLVM_COV[@]}" report "$BINARY" \
     -instr-profile="$PROFDATA" \
