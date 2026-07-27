@@ -12,13 +12,16 @@ written*. This file owns *the shape of data crossing the boundary*.
 
 ## 1. Scope
 
-**In scope.** Three record types, each with a JSON and a CSV encoding:
+**In scope.** Three record types:
 
-| Type | Direction | What it is |
-|---|---|---|
-| `known_task` | export + import | The Known Tasks registry — the reconcile spine, the set of valid binding targets |
-| `worklog` | export + import | Derived, reconciled time ready to be recorded against real tickets |
-| `event` | export only | The raw append-only log, lossless, for archival and debugging |
+| Type | Direction | Encodings | What it is |
+|---|---|---|---|
+| `known_task` | export + import | JSON, CSV | The Known Tasks registry — the reconcile spine, the set of valid binding targets |
+| `worklog` | export + import | JSON, CSV | Derived, reconciled time ready to be recorded against real tickets |
+| `event` | export only | JSON, NDJSON | The raw append-only log, lossless, for archival and debugging |
+
+`event` has **no CSV encoding** — events are sparse across 14 types and flatten
+to a misleading mostly-empty grid. See §6.3.
 
 **Non-goals.**
 
@@ -413,10 +416,16 @@ Lossless dump of the append-only log: every column of `Event`, snake_cased —
 `known_task_id`, `next_phase_id` — plus a resolved `task_name` for readability.
 
 `id` is included because "lossless" has to mean it. It is the autoincrement
-primary key: monotonic within one database and therefore usable as a cursor for
-incremental export (`--from` the last id you saw). It is **not** portable across
+primary key, monotonic within one database.
+
+Two constraints on how a consumer may use it. It is **not** portable across
 databases and must not be treated as a global identifier — two machines' logs
-will reuse the same ids for different events.
+will reuse the same ids for different events. And while its monotonicity would
+make it a natural cursor for incremental export, **v1 defines no id-cursor
+flag**: `--from` and `--to` are dates everywhere in this spec, with no
+overloading. A consumer wanting incremental export filters on `id` client-side.
+Adding a distinct flag (`--since-id`) is a reasonable v2 addition and is
+deliberately not smuggled into the date flags.
 
 JSON or NDJSON only — **no CSV**. Events are sparse and heterogeneous across 14
 event types; flattening them to a fixed column set produces a mostly-empty grid
