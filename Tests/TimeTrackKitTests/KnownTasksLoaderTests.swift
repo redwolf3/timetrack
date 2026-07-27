@@ -233,9 +233,10 @@ final class KnownTasksLoaderTests: XCTestCase {
         let url = try writeYAML("known_tasks:\n  - jiraKey: PROJ-1\n    description: \"\"\n", to: dir)
 
         XCTAssertThrowsError(try KnownTasksLoader.ingest(from: url, into: store)) { error in
-            guard case KnownTasksLoader.ValidationError.emptyDescription = error else {
+            guard case KnownTasksLoader.ValidationError.emptyDescription(let source) = error else {
                 return XCTFail("expected .emptyDescription, got \(error)")
             }
+            XCTAssertEqual(source, "known_tasks.yaml")
         }
     }
 
@@ -246,10 +247,37 @@ final class KnownTasksLoaderTests: XCTestCase {
         let url = try writeYAML("known_tasks:\n  - description: \"   \"\n", to: dir)
 
         XCTAssertThrowsError(try KnownTasksLoader.ingest(from: url, into: store)) { error in
-            guard case KnownTasksLoader.ValidationError.emptyDescription = error else {
+            guard case KnownTasksLoader.ValidationError.emptyDescription(let source) = error else {
                 return XCTFail("expected .emptyDescription, got \(error)")
             }
+            XCTAssertEqual(source, "known_tasks.yaml")
         }
+    }
+
+    // The refactor that shared validation across every reader moved trimming
+    // out of validateWithinFile and into each decoder independently — the
+    // decoders all trim before constructing a KnownTaskEntry, but the seam
+    // itself (ingest(entries:...)) did not, so a caller that builds a
+    // KnownTaskEntry directly (bypassing every decoder) could sneak a
+    // whitespace-only description past validation. Tested directly against the
+    // public seam, not through a decoder, so this holds regardless of which
+    // reader is ever added next.
+    func testWhitespaceOnlyDescriptionRejectedAtThePublicSeamDirectly() throws {
+        let dir = try makeTmpDir()
+        let store = try makeStore(in: dir)
+
+        let entries = [KnownTasksLoader.KnownTaskEntry(description: "   ", jiraKey: nil)]
+
+        XCTAssertThrowsError(
+            try KnownTasksLoader.ingest(entries: entries, into: store, sourceName: "direct.json")
+        ) { error in
+            guard case KnownTasksLoader.ValidationError.emptyDescription(let source) = error else {
+                return XCTFail("expected .emptyDescription, got \(error)")
+            }
+            XCTAssertEqual(source, "direct.json")
+        }
+
+        XCTAssertTrue(try store.knownTasks(activeOnly: false).isEmpty, "rejected entry must not have been inserted")
     }
 
     // MARK: - Test 10: Duplicate jiraKey in file → throws .duplicateJiraKey
@@ -268,10 +296,11 @@ final class KnownTasksLoaderTests: XCTestCase {
         let url = try writeYAML(yaml, to: dir)
 
         XCTAssertThrowsError(try KnownTasksLoader.ingest(from: url, into: store)) { error in
-            guard case KnownTasksLoader.ValidationError.duplicateJiraKey(let key) = error else {
+            guard case KnownTasksLoader.ValidationError.duplicateJiraKey(let key, let source) = error else {
                 return XCTFail("expected .duplicateJiraKey, got \(error)")
             }
             XCTAssertEqual(key, "PROJ-1")
+            XCTAssertEqual(source, "known_tasks.yaml")
         }
     }
 
@@ -289,10 +318,11 @@ final class KnownTasksLoaderTests: XCTestCase {
         let url = try writeYAML(yaml, to: dir)
 
         XCTAssertThrowsError(try KnownTasksLoader.ingest(from: url, into: store)) { error in
-            guard case KnownTasksLoader.ValidationError.duplicateProvisionalDescription(let desc) = error else {
+            guard case KnownTasksLoader.ValidationError.duplicateProvisionalDescription(let desc, let source) = error else {
                 return XCTFail("expected .duplicateProvisionalDescription, got \(error)")
             }
             XCTAssertEqual(desc, "Same provisional description")
+            XCTAssertEqual(source, "known_tasks.yaml")
         }
     }
 
@@ -316,11 +346,12 @@ final class KnownTasksLoaderTests: XCTestCase {
         let url = try writeYAML(yaml, to: dir)
 
         XCTAssertThrowsError(try KnownTasksLoader.ingest(from: url, into: store)) { error in
-            guard case KnownTasksLoader.ValidationError.ambiguousJiraKey(let key, let ids) = error else {
+            guard case KnownTasksLoader.ValidationError.ambiguousJiraKey(let key, let ids, let source) = error else {
                 return XCTFail("expected .ambiguousJiraKey, got \(error)")
             }
             XCTAssertEqual(key, "PROJ-DUP")
             XCTAssertEqual(Set(ids), Set([aId, bId]))
+            XCTAssertEqual(source, "known_tasks.yaml")
         }
     }
 
@@ -345,12 +376,89 @@ final class KnownTasksLoaderTests: XCTestCase {
         let url = try writeYAML(yaml, to: dir)
 
         XCTAssertThrowsError(try KnownTasksLoader.ingest(from: url, into: store)) { error in
-            guard case KnownTasksLoader.ValidationError.ambiguousProvisionalDescription(let desc, let ids) = error else {
+            guard case KnownTasksLoader.ValidationError.ambiguousProvisionalDescription(let desc, let ids, let source) = error else {
                 return XCTFail("expected .ambiguousProvisionalDescription, got \(error)")
             }
             XCTAssertEqual(desc, "Ambiguous provisional")
             XCTAssertEqual(Set(ids), Set([aId, bId]))
+            XCTAssertEqual(source, "known_tasks.yaml")
         }
+    }
+
+    // Reproduces the reported bug directly: a registry holding a pre-existing
+    // ambiguous jiraKey (two rows sharing DUP-1) must reject the WHOLE input —
+    // including entries earlier in the file than the ambiguous one — rather
+    // than partially applying and then throwing mid-loop. Both ambiguousJiraKey
+    // and ambiguousProvisionalDescription are pre-scanned from the registry
+    // snapshot before any write (KnownTasksLoader.checkAmbiguity), so this must
+    // leave the registry byte-for-byte as it started.
+    func testAmbiguityFailureLeavesRegistryUnchangedEvenWithEarlierEntries() throws {
+        let dir = try makeTmpDir()
+        let store = try makeStore(in: dir)
+
+        let a = try store.addKnownTask(jiraKey: "DUP-1", description: "Entry A")
+        let b = try store.addKnownTask(jiraKey: "DUP-1", description: "Entry B")
+        let aId = try XCTUnwrap(a.id)
+        let bId = try XCTUnwrap(b.id)
+
+        let before = try store.knownTasks(activeOnly: false)
+        XCTAssertEqual(before.count, 2, "pre-condition: two ambiguous rows seeded")
+
+        // LATER-1 comes first in the file and would insert cleanly on its own;
+        // DUP-1 comes second and is ambiguous. Before the fix, LATER-1 would
+        // already be written by the time DUP-1's ambiguity was discovered.
+        let entries = [
+            KnownTasksLoader.KnownTaskEntry(description: "Brand new", jiraKey: "LATER-1"),
+            KnownTasksLoader.KnownTaskEntry(description: "Some description", jiraKey: "DUP-1")
+        ]
+
+        XCTAssertThrowsError(
+            try KnownTasksLoader.ingest(entries: entries, into: store, sourceName: "sprint-42.json")
+        ) { error in
+            guard case KnownTasksLoader.ValidationError.ambiguousJiraKey(let key, let ids, let source) = error else {
+                return XCTFail("expected .ambiguousJiraKey, got \(error)")
+            }
+            XCTAssertEqual(key, "DUP-1")
+            XCTAssertEqual(Set(ids), Set([aId, bId]))
+            XCTAssertEqual(source, "sprint-42.json")
+        }
+
+        let after = try store.knownTasks(activeOnly: false)
+        XCTAssertEqual(after.count, 2, "no row from the earlier, individually-valid entry must have been inserted")
+        XCTAssertFalse(after.contains { $0.jiraKey == "LATER-1" },
+                        "LATER-1 must not have been written before the later ambiguity was discovered")
+        XCTAssertEqual(Set(after.map { $0.id }), Set([aId, bId]), "the two pre-existing rows must be untouched")
+    }
+
+    // Same reproduction for the provisional-description ambiguity branch.
+    func testProvisionalAmbiguityFailureLeavesRegistryUnchangedEvenWithEarlierEntries() throws {
+        let dir = try makeTmpDir()
+        let store = try makeStore(in: dir)
+
+        let a = try store.addKnownTask(jiraKey: nil, description: "Ambiguous provisional")
+        let b = try store.addKnownTask(jiraKey: nil, description: "Ambiguous provisional")
+        let aId = try XCTUnwrap(a.id)
+        let bId = try XCTUnwrap(b.id)
+
+        let entries = [
+            KnownTasksLoader.KnownTaskEntry(description: "Brand new", jiraKey: "LATER-2"),
+            KnownTasksLoader.KnownTaskEntry(description: "Ambiguous provisional", jiraKey: "PROJ-NEW")
+        ]
+
+        XCTAssertThrowsError(
+            try KnownTasksLoader.ingest(entries: entries, into: store, sourceName: "sprint-42.json")
+        ) { error in
+            guard case KnownTasksLoader.ValidationError.ambiguousProvisionalDescription(let desc, let ids, let source) = error else {
+                return XCTFail("expected .ambiguousProvisionalDescription, got \(error)")
+            }
+            XCTAssertEqual(desc, "Ambiguous provisional")
+            XCTAssertEqual(Set(ids), Set([aId, bId]))
+            XCTAssertEqual(source, "sprint-42.json")
+        }
+
+        let after = try store.knownTasks(activeOnly: false)
+        XCTAssertEqual(after.count, 2, "no row from the earlier, individually-valid entry must have been inserted")
+        XCTAssertFalse(after.contains { $0.jiraKey == "LATER-2" })
     }
 
     // MARK: - Test 14: Retired entry not resurrected
@@ -594,5 +702,206 @@ final class KnownTasksLoaderTests: XCTestCase {
         let proj2 = try XCTUnwrap(all.first { $0.jiraKey == "PROJ-2" })
         XCTAssertNotEqual(proj2.id, provisionalId, "PROJ-2 must be a distinct registry entry, not a double-promote on the same id")
         XCTAssertFalse(proj2.provisional)
+    }
+
+    // MARK: - New public seam: ingest(entries:into:sourceName:dryRun:)
+
+    // The entries-based seam must produce the same registry outcome as the YAML
+    // path for an equivalent input (docs/interchange-format.md §4.2: JSON/CSV
+    // must reuse this exact upsert, not a second implementation).
+    func testIngestEntriesProducesSameOutcomeAsYAMLPath() throws {
+        let dirYAML = try makeTmpDir()
+        let storeYAML = try makeStore(in: dirYAML)
+        let yaml = """
+        known_tasks:
+          - jiraKey: PROJ-1
+            description: "Build the widget"
+          - description: "Some provisional thing"
+        """
+        let url = try writeYAML(yaml, to: dirYAML)
+        let yamlCount = try KnownTasksLoader.ingest(from: url, into: storeYAML)
+
+        let dirEntries = try makeTmpDir()
+        let storeEntries = try makeStore(in: dirEntries)
+        let entries = [
+            KnownTasksLoader.KnownTaskEntry(description: "Build the widget", jiraKey: "PROJ-1"),
+            KnownTasksLoader.KnownTaskEntry(description: "Some provisional thing", jiraKey: nil)
+        ]
+        let result = try KnownTasksLoader.ingest(entries: entries, into: storeEntries, sourceName: "sprint-42.json")
+
+        XCTAssertEqual(yamlCount, result.changeCount, "entries-based seam must report the same change count as the equivalent YAML ingest")
+
+        let yamlRows = try storeYAML.knownTasks(activeOnly: false)
+        let entryRows = try storeEntries.knownTasks(activeOnly: false)
+        XCTAssertEqual(yamlRows.count, entryRows.count)
+        XCTAssertEqual(Set(yamlRows.map { $0.jiraKey }), Set(entryRows.map { $0.jiraKey }))
+        XCTAssertEqual(Set(yamlRows.map { $0.description }), Set(entryRows.map { $0.description }))
+        XCTAssertEqual(Set(yamlRows.map { $0.provisional }), Set(entryRows.map { $0.provisional }))
+    }
+
+    // Each of the four outcome categories must be reported with the data needed
+    // to describe it to a user (docs/interchange-format.md §4.2 dry-run diff).
+    func testEachOutcomeCategoryIsReportedCorrectly() throws {
+        let dir = try makeTmpDir()
+        let store = try makeStore(in: dir)
+
+        // Pre-seed registry state for promote / descriptionUpdate / noOp to match against.
+        let provisional = try store.addKnownTask(jiraKey: nil, description: "Feature to promote")
+        let provisionalId = try XCTUnwrap(provisional.id)
+        let stale = try store.addKnownTask(jiraKey: "PROJ-STALE", description: "Old text")
+        let staleId = try XCTUnwrap(stale.id)
+        let unchanged = try store.addKnownTask(jiraKey: "PROJ-SAME", description: "Already correct")
+        let unchangedId = try XCTUnwrap(unchanged.id)
+
+        let entries = [
+            KnownTasksLoader.KnownTaskEntry(description: "Brand new entry", jiraKey: "PROJ-NEW"),                 // insert
+            KnownTasksLoader.KnownTaskEntry(description: "Feature to promote", jiraKey: "PROJ-PROMOTED"),          // promote
+            KnownTasksLoader.KnownTaskEntry(description: "New text", jiraKey: "PROJ-STALE"),                       // descriptionUpdate
+            KnownTasksLoader.KnownTaskEntry(description: "Already correct", jiraKey: "PROJ-SAME")                  // noOp
+        ]
+
+        let result = try KnownTasksLoader.ingest(entries: entries, into: store, sourceName: "sprint-42.csv")
+        XCTAssertEqual(result.changes.count, entries.count, "one Change per input entry")
+
+        guard case .insert = result.changes[0].outcome else {
+            return XCTFail("expected .insert, got \(result.changes[0].outcome)")
+        }
+        guard case .promote(let promotedId) = result.changes[1].outcome else {
+            return XCTFail("expected .promote, got \(result.changes[1].outcome)")
+        }
+        XCTAssertEqual(promotedId, .existing(provisionalId))
+        guard case .descriptionUpdate(let updId, let previous) = result.changes[2].outcome else {
+            return XCTFail("expected .descriptionUpdate, got \(result.changes[2].outcome)")
+        }
+        XCTAssertEqual(updId, .existing(staleId))
+        XCTAssertEqual(previous, "Old text")
+        guard case .noOp(let noOpId) = result.changes[3].outcome else {
+            return XCTFail("expected .noOp, got \(result.changes[3].outcome)")
+        }
+        XCTAssertEqual(noOpId, .existing(unchangedId))
+
+        XCTAssertEqual(result.changeCount, 3, "insert + promote + descriptionUpdate count; noOp does not")
+    }
+
+    // `dryRun: true` must write nothing to the store, yet return exactly the
+    // same `changes` a subsequent real run would produce.
+    func testDryRunWritesNothingButMatchesRealRunChanges() throws {
+        let dir = try makeTmpDir()
+        let store = try makeStore(in: dir)
+
+        _ = try store.addKnownTask(jiraKey: nil, description: "Feature to promote")
+        _ = try store.addKnownTask(jiraKey: "PROJ-STALE", description: "Old text")
+
+        let entries = [
+            KnownTasksLoader.KnownTaskEntry(description: "Brand new entry", jiraKey: "PROJ-NEW"),
+            KnownTasksLoader.KnownTaskEntry(description: "Feature to promote", jiraKey: "PROJ-PROMOTED"),
+            KnownTasksLoader.KnownTaskEntry(description: "New text", jiraKey: "PROJ-STALE")
+        ]
+
+        let beforeCount = try store.knownTasks(activeOnly: false).count
+
+        let dryResult = try KnownTasksLoader.ingest(entries: entries, into: store, sourceName: "x.json", dryRun: true)
+
+        let afterDryRun = try store.knownTasks(activeOnly: false)
+        XCTAssertEqual(afterDryRun.count, beforeCount, "dryRun must perform zero writes (no rows inserted)")
+        XCTAssertTrue(afterDryRun.contains { $0.description == "Feature to promote" && $0.provisional },
+                      "dryRun must not have promoted the provisional row")
+        XCTAssertTrue(afterDryRun.contains { $0.jiraKey == "PROJ-STALE" && $0.description == "Old text" },
+                      "dryRun must not have updated the description in the store")
+
+        let realResult = try KnownTasksLoader.ingest(entries: entries, into: store, sourceName: "x.json", dryRun: false)
+
+        XCTAssertEqual(dryResult.changes.map(\.outcome.categoryLabel), realResult.changes.map(\.outcome.categoryLabel),
+                        "dry run and the subsequent real run must report the same outcome categories")
+        XCTAssertEqual(dryResult.changeCount, realResult.changeCount)
+
+        // Insert outcomes carry no id, so they always match; promote/descriptionUpdate
+        // ids must agree between the synthesised dry-run pass and the real pass.
+        for (dry, real) in zip(dryResult.changes, realResult.changes) {
+            XCTAssertEqual(dry.entry, real.entry)
+        }
+        if case .promote(let dryId) = dryResult.changes[1].outcome, case .promote(let realId) = realResult.changes[1].outcome {
+            XCTAssertEqual(dryId, realId, "promote must target the same real registry id under dryRun as under a real run")
+        } else {
+            XCTFail("expected both changes[1] to be .promote")
+        }
+    }
+
+    // Note on scope: a literal pair of textually-identical provisional entries
+    // (same description, no jiraKey, twice in one input) is rejected up front by
+    // validateWithinFile per docs/interchange-format.md §4.2 rule 8 ("a
+    // description repeated among provisional records in the file is an error") —
+    // that rule is required and already covered by
+    // testDuplicateProvisionalDescriptionInFileThrows, and it fires before the
+    // matching loop ever runs, dryRun or not. So "two identical entries" can only
+    // legally reach the matching loop when they are identical in description but
+    // differ in jiraKey-namespace membership. This test is the dryRun analogue of
+    // testTwoKeyedEntriesSharingDescriptionDoNotDoublePromoteSameId: without
+    // snapshot sync of the *synthesised* rows, the second entry would re-match the
+    // same (still-provisional-looking) row and either double-promote it or, if the
+    // sync only ran one level deep, report a phantom second change against the
+    // same id. With sync, the second entry correctly sees the first's synthesised
+    // promote and inserts a brand-new distinct row instead.
+    func testDryRunSnapshotSyncPreventsDoublePromoteOnSharedDescription() throws {
+        let dir = try makeTmpDir()
+        let store = try makeStore(in: dir)
+
+        let provisional = try store.addKnownTask(jiraKey: nil, description: "Shared feature")
+        let provisionalId = try XCTUnwrap(provisional.id)
+
+        let entries = [
+            KnownTasksLoader.KnownTaskEntry(description: "Shared feature", jiraKey: "PROJ-1"),
+            KnownTasksLoader.KnownTaskEntry(description: "Shared feature", jiraKey: "PROJ-2")
+        ]
+
+        let result = try KnownTasksLoader.ingest(entries: entries, into: store, sourceName: "dup.json", dryRun: true)
+
+        XCTAssertEqual(result.changes.count, 2)
+        guard case .promote(let promotedId) = result.changes[0].outcome else {
+            return XCTFail("expected first entry to be .promote, got \(result.changes[0].outcome)")
+        }
+        XCTAssertEqual(promotedId, .existing(provisionalId), "first entry promotes the real pre-existing provisional row")
+        guard case .insert = result.changes[1].outcome else {
+            return XCTFail("expected second entry to be a distinct .insert (not a double-promote of the same id), got \(result.changes[1].outcome)")
+        }
+
+        // dryRun: the store must be untouched — still exactly the one pre-seeded
+        // provisional row, still provisional.
+        let all = try store.knownTasks(activeOnly: false)
+        XCTAssertEqual(all.count, 1, "dryRun must not have written anything")
+        XCTAssertTrue(all[0].provisional, "dryRun must not have performed the promote against the store")
+    }
+
+    // A validation error raised via the entries seam with a non-YAML source name
+    // must render that source name, not the historical "known_tasks.yaml:" literal.
+    func testValidationErrorRendersNonYAMLSourceName() throws {
+        let dir = try makeTmpDir()
+        let store = try makeStore(in: dir)
+
+        let entries = [
+            KnownTasksLoader.KnownTaskEntry(description: "", jiraKey: nil)
+        ]
+
+        XCTAssertThrowsError(try KnownTasksLoader.ingest(entries: entries, into: store, sourceName: "sprint-42.csv")) { error in
+            guard case KnownTasksLoader.ValidationError.emptyDescription(let source) = error else {
+                return XCTFail("expected .emptyDescription, got \(error)")
+            }
+            XCTAssertEqual(source, "sprint-42.csv")
+            XCTAssertEqual("\(error)", "sprint-42.csv: description must not be empty")
+            XCTAssertFalse("\(error)".contains("known_tasks.yaml"), "error must not name the wrong file")
+        }
+    }
+}
+
+private extension KnownTasksLoader.IngestResult.Outcome {
+    // Test-only label so dry-run vs real-run changes can be compared by category
+    // without caring about the specific (possibly synthetic) id involved.
+    var categoryLabel: String {
+        switch self {
+        case .insert: return "insert"
+        case .promote: return "promote"
+        case .descriptionUpdate: return "descriptionUpdate"
+        case .noOp: return "noOp"
+        }
     }
 }
