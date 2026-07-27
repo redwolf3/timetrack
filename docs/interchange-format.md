@@ -160,6 +160,16 @@ the semantics below. A JSON/CSV reader must decode to the same intermediate
 representation the YAML reader produces and hand off to the shared upsert. Do
 **not** write a second upsert path — that is how the two silently diverge.
 
+**Diagnostics must name the real input file.** Every case of
+`KnownTasksLoader.ValidationError` currently hardcodes the prefix
+`known_tasks.yaml:` into its message. Reusing the loader as-is would tell a user
+importing `sprint-42.csv` that something is wrong with `known_tasks.yaml`, which
+is actively misleading — they would go and edit the wrong file. `import known`
+must either wrap these errors and re-prefix them with the actual path, or the
+loader must be refactored to take the source name as a parameter. The latter is
+cleaner and keeps one message set; either is acceptable, but shipping the
+hardcoded prefix is not.
+
 Restating the rules the loader enforces, so a reviewer can check the handoff.
 Note the two branches are **not** symmetric: description is an identity key only
 *among provisional rows*. A description shared with a keyed row does not match.
@@ -295,15 +305,18 @@ raw window totals — a task does not escape the gate by rounding to zero.
 
 ### 5.4 Normalisation
 
-`Store.reconciledReport` takes `dropBelowSec`, `minIntervalMin`, `roundToMin`,
-`aggregateKey`, and `subFifteenResolutions`. Export must expose these rather than
-hardcode them, because **the CLI and the app currently disagree**: the app's
-reconcile panel uses 30s / 1min / 15min / `"MISC"`, and the CLI passes all zeros.
-Two different numbers for the same window is unacceptable in an export contract.
+`Store.reconciledReport` takes five knobs: `dropBelowSec`, `minIntervalMin`,
+`roundToMin`, `aggregateKey`, and `subFifteenResolutions`. Export must expose the
+**first four** rather than hardcode them, because **the CLI and the app currently
+disagree**: the app's reconcile panel uses 30s / 1min / 15min / `"MISC"`, and the
+CLI passes all zeros. Two different numbers for the same window is unacceptable
+in an export contract.
+
+`subFifteenResolutions` is deliberately **not** exposed in v1 — see §5.5.
 
 Requirements:
 
-- Export accepts the normalisation parameters and applies them to `seconds`.
+- Export accepts the four normalisation parameters and applies them to `seconds`.
 - `raw_seconds` always reports the pre-normalisation value, so the delta is
   visible without re-running anything.
 - The parameters actually used are recorded in the JSON envelope under
@@ -320,9 +333,29 @@ Requirements:
   Resolving that divergence may land as its own change; until it does, export
   **must** state its defaults in `--help` and in the envelope.
 
-Sub-quantum keys with no entry in `subFifteenResolutions` are reported as-is at
-their raw post-pass-1 seconds — the existing code makes no silent billing
-decision and neither does export.
+### 5.5 Sub-15 resolutions are out of scope in v1
+
+`reconciledReport`'s fifth parameter, `subFifteenResolutions`, is a per-key map of
+`recordAs15 | drop | rollIntoAggregate`. **Export does not expose it and never
+populates it in v1.** Sub-quantum keys are emitted as-is at their raw
+post-pass-1 seconds, which is exactly what the existing code does for an
+unresolved key — it makes no silent billing decision, and neither does export.
+
+Two reasons, and the second is the important one:
+
+1. A map-valued CLI flag (`--sub-fifteen PROJ-1=drop,PROJ-2=record15`) is a poor
+   fit for a knob whose entire purpose is a per-key interactive judgement call.
+2. **Export could not reproduce an app-side resolution even if it wanted to.**
+   The app's resolutions are session-only state, reset on every
+   `refreshReconcile()` and never persisted as events. A report a user finalised
+   in the UI yesterday cannot be regenerated today, by export or by anything
+   else.
+
+Point 2 is a real limitation of the current implementation, not of this format:
+a user who resolves sub-15 keys in the app and then exports will get different
+numbers. Persisting resolutions as append-only events would fix it and would let
+export apply them automatically with no new flags. That is the right shape, it is
+out of scope here, and it is recorded in §9.5.
 
 ---
 
@@ -374,10 +407,16 @@ scripts are the guard rail.
 
 ### 6.3 `export events`
 
-Lossless dump of the append-only log: every column of `Event`, snake_cased
-(`ts`, `type`, `task_id`, `prev_task_id`, `phase_id`, `profile_name`,
+Lossless dump of the append-only log: every column of `Event`, snake_cased —
+`id`, `ts`, `type`, `task_id`, `prev_task_id`, `phase_id`, `profile_name`,
 `extend_min`, `comment`, `range_start`, `range_end`, `jira_key`,
-`known_task_id`, `next_phase_id`), plus a resolved `task_name` for readability.
+`known_task_id`, `next_phase_id` — plus a resolved `task_name` for readability.
+
+`id` is included because "lossless" has to mean it. It is the autoincrement
+primary key: monotonic within one database and therefore usable as a cursor for
+incremental export (`--from` the last id you saw). It is **not** portable across
+databases and must not be treated as a global identifier — two machines' logs
+will reuse the same ids for different events.
 
 JSON or NDJSON only — **no CSV**. Events are sparse and heterogeneous across 14
 event types; flattening them to a fixed column set produces a mostly-empty grid
@@ -506,6 +545,13 @@ Flagged so a future implementer raises them rather than silently picking:
 4. **Whether `export worklog` should emit break time.** Excluded in v1 —
    the break task is synthetic and never bound. Revisit if anyone wants
    break-inclusive utilisation reports.
+5. **Persisting sub-15 resolutions as events.** §5.5 excludes
+   `subFifteenResolutions` from v1 partly because app-side resolutions are
+   session-only and cannot be reproduced. Appending them as events would make a
+   finalised report regenerable, let export apply them with no new flags, and
+   remove the app-vs-export divergence. It fits the append-only model cleanly.
+   Needs its own issue; it is a prerequisite for export and the app agreeing on
+   every window, not just windows with no sub-quantum keys.
 
 ---
 
