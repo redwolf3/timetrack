@@ -41,12 +41,33 @@ public final class Tracker {
     public private(set) var pendingIdleSegments: [IdleSegment] = []
 
     // Whether .toBreak is a resolution the store can actually honour. False when
-    // the registry has no synthetic break row (Store's -1 sentinel), in which case
+    // the registry has no synthetic break row, in which case
     // resolveIdleSegment(.toBreak) no-ops — so the app must not offer the choice.
-    public var canClassifyAsBreak: Bool { breakTaskIdOrNil != nil }
+    //
+    // Derived from the in-memory `tasks` cache, NOT from store.breakTaskId(): this
+    // is a per-frame GATE — the app re-evaluates it on its 1 Hz refresh while
+    // rendering the classification section — so it must not hit the DB every
+    // second (tick() already reads breakTaskId() once per second for segmentation).
+    //
+    // This is deliberately NOT duplicated logic against breakTaskIdOrNil below:
+    // the cheap gate and the authoritative resolution are genuinely different jobs.
+    //   * gate    — "should the UI offer Break at all?" Answered from cache,
+    //               evaluated constantly, wrong-by-staleness is harmless.
+    //   * resolve — must name the EXACT row segmentation used (tick() feeds
+    //               store.breakTaskId() into IdleMonitor), runs once per user
+    //               click, so re-reading the DB is free and correctness-relevant.
+    // Do not "simplify" one into the other.
+    //
+    // Store.ensureBreakTask() runs inside Store.init, i.e. strictly before
+    // Tracker.init loads `tasks`, so the cache can never be missing the break row
+    // at startup. If the two ever did disagree (row removed underneath us),
+    // resolveIdleSegment(.toBreak) no-ops rather than writing an FK-invalid
+    // taskId — see its guard.
+    public var canClassifyAsBreak: Bool { tasks.contains { $0.category == "break" } }
 
     // The synthetic break task's id, or nil for Store's "-1 = no break row"
-    // sentinel. Private: callers say what they MEAN (.toBreak) and let the kit
+    // sentinel. Store-backed on purpose (see canClassifyAsBreak above).
+    // Private: callers say what they MEAN (.toBreak) and let the kit
     // resolve it, so no "break" category literal or -1 sentinel leaks outward.
     private var breakTaskIdOrNil: Int64? {
         let id = (try? store.breakTaskId()) ?? -1

@@ -551,6 +551,17 @@ final class AppState: ObservableObject {
     // all. Assigns only on an actual change so the 1 Hz caller doesn't fire
     // objectWillChange every second (IdleSegmentItem is Equatable for this).
     private func rebuildIdleSegmentItems() {
+        // Nothing pending is the common case (this runs on the 1 Hz refresh), so
+        // do no work at all then — but CLEAR first: the last segment being resolved
+        // is exactly the transition where the kit's list goes empty while ours
+        // still holds the row, and returning early without clearing would strand
+        // that row on screen forever. Still change-guarded, so the steady empty
+        // state fires no objectWillChange.
+        guard !tracker.pendingIdleSegments.isEmpty else {
+            if !pendingIdleSegments.isEmpty { pendingIdleSegments = [] }
+            return
+        }
+
         // The already-published, user-selectable task list (the synthetic break
         // row is filtered out of it) — Break is offered as its own choice, via
         // the kit's canClassifyAsBreak rather than any category matching here.
