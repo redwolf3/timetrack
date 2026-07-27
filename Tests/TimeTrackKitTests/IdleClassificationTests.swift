@@ -401,8 +401,16 @@ final class IdleClassificationTests: XCTestCase {
             }
             for _ in 0..<5 { await _Concurrency.Task.yield() }
         }
+        // The yields are still load-bearing: cancelling an AsyncStream iteration
+        // ends `for await` immediately and DISCARDS whatever is still sitting in
+        // the stream's buffer, so the drain task must be given a chance to run
+        // out the last batch before we cancel it.
         for _ in 0..<20 { await _Concurrency.Task.yield() }
         drain.cancel()
+        // Awaiting completion is what makes the snapshot below deterministic: the
+        // drain task may be suspended inside `await collector.add(e)` at cancel
+        // time, and only joining it guarantees that add has landed.
+        _ = await drain.value
 
         let collected = await collector.all
         let sounds = collected.compactMap { effect -> String? in
