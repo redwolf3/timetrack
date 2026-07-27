@@ -117,6 +117,46 @@ final class IdleClassificationTests: XCTestCase {
                        "no idle_resolve may be written until the user classifies the segment")
     }
 
+    // MARK: - 2b. Attribution is captured at episode OPEN, not at return
+
+    // The race: the user comes back AND switches task within the same 1 Hz tick,
+    // so the return-detecting tick reads the NEW task. Attributing the segment to
+    // it would make idle_resolve.prevTaskId name a task that never accrued the
+    // interval — the correction would subtract from the wrong task and leave the
+    // real one over-credited. The accrual context is therefore frozen on the
+    // episode when it opens.
+    func testAttributionUsesTheTaskActiveAtIdleStartNotAtReturn() throws {
+        let ctx = try MainActor.assumeIsolated { try makeCtx() }
+        var b = Task(id: nil, name: "TaskB", code: nil, category: "project", archived: false)
+        b = try ctx.store.upsertTask(b)
+        let taskB = b.id!
+
+        let pending: [IdleSegment] = MainActor.assumeIsolated {
+            ctx.tracker.start(taskId: ctx.taskA)
+            ctx.source.set(300)
+            ctx.tracker.tick(at: Date().addingTimeInterval(600))   // idle opens on A
+
+            // User returns and immediately switches — both land before the tick
+            // that detects the return.
+            ctx.tracker.switchTo(taskId: taskB)
+            ctx.source.set(0)
+            ctx.tracker.tick(at: Date().addingTimeInterval(601))
+            return ctx.tracker.pendingIdleSegments
+        }
+
+        XCTAssertEqual(pending.count, 1)
+        XCTAssertEqual(pending[0].originalTaskId, ctx.taskA,
+                       "the segment belongs to the task that was accruing at idle-start")
+
+        MainActor.assumeIsolated {
+            ctx.tracker.resolveIdleSegment(pending[0].id, as: .discard)
+        }
+        let resolves = try events(ctx.store, .idleResolve)
+        XCTAssertEqual(resolves.count, 1)
+        XCTAssertEqual(resolves[0].prevTaskId, ctx.taskA,
+                       "prevTaskId must name the task the base walk credited, not the new one")
+    }
+
     // MARK: - 3. Resolving each segment appends one disjoint idle_resolve and
     //            report(day:) actually moves the seconds
 

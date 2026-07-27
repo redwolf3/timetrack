@@ -74,16 +74,23 @@ private struct IdleSegmentRowView: View {
             }
 
             HStack(spacing: 6) {
-                Menu("Move to") {
-                    ForEach(item.moveTargets) { target in
-                        Button(target.name) {
-                            appState.resolveIdleSegment(item.id, as: .moveTo(taskId: target.id))
+                // Omitted when there is nowhere else to move the time (the
+                // single-task case, where the only task IS the original). An
+                // always-present menu that opens empty reads as broken. Same
+                // pattern as the Break button above; a row left with just Keep
+                // and Discard is a complete, correct set of choices.
+                if !item.moveTargets.isEmpty {
+                    Menu("Move to") {
+                        ForEach(item.moveTargets) { target in
+                            Button(target.name) {
+                                appState.resolveIdleSegment(item.id, as: .moveTo(taskId: target.id))
+                            }
                         }
                     }
+                    .menuStyle(.borderlessButton)
+                    .controlSize(.small)
+                    .fixedSize()
                 }
-                .menuStyle(.borderlessButton)
-                .controlSize(.small)
-                .fixedSize()
 
                 // Discard: the time is removed from the original task and credited
                 // to nobody (idle_resolve with a null taskId).

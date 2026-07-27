@@ -40,13 +40,37 @@ public final class IdleEpisode {
     public var returnTime: Date?
     public var segments: [IdleSegment] = []
 
+    // Accrual context FROZEN at open time — what was actually accruing when the
+    // user walked away. Segments are built from these, never from the values on
+    // the return tick.
+    //
+    // Why: the user can return AND switch task within the same 1 Hz tick, so the
+    // return-detecting tick may already read the NEW task. Attributing the
+    // segment to it would make idle_resolve.prevTaskId name a task that never
+    // accrued the interval — the report's second pass would subtract from the
+    // wrong task and leave the real one over-credited.
+    //
+    // Task and phase are captured TOGETHER: capturing only the task would still
+    // let the race pair an old task with a new phase id. In the non-race case
+    // these are identical to the return-tick values (the cycle freezes at the
+    // first unacked arm and nothing advances a phase without user input) — the
+    // point is to make the race unrepresentable, not to change behaviour.
+    public let accrualTaskId: Int64
+    public let phaseId: String
+    public let wasBreakPhase: Bool
+
     // Presence-gated escalation bookkeeping. activeSecondsSinceReturn only
     // accumulates while input is actually detected — pauses if user leaves again.
     public var activeSecondsSinceReturn: TimeInterval = 0
     public var lastRungFired: Int = -1
     public var lastNotifyAt: Date?
 
-    public init(idleStart: Date) { self.idleStart = idleStart }
+    public init(idleStart: Date, accrualTaskId: Int64, phaseId: String, wasBreakPhase: Bool) {
+        self.idleStart = idleStart
+        self.accrualTaskId = accrualTaskId
+        self.phaseId = phaseId
+        self.wasBreakPhase = wasBreakPhase
+    }
 
     public var unresolvedSegments: [IdleSegment] { segments.filter { !$0.resolved } }
     public var fullyResolved: Bool { segments.allSatisfy { $0.resolved } }
@@ -134,10 +158,15 @@ public final class IdleMonitor {
         // --- Episode open ---
         // Gated on "no LIVE episode", not "no episodes at all": earlier episodes
         // awaiting classification must not block detection of a new idle window.
-        if nowIdle, liveEpisode == nil, currentTaskId != nil {
+        if nowIdle, liveEpisode == nil, let taskId = currentTaskId {
             // Idle began at now - idleSec, not now.
             let start = now.addingTimeInterval(-idleSec)
-            episodes.append(IdleEpisode(idleStart: start))
+            // Freeze the accrual context HERE — see IdleEpisode.
+            episodes.append(IdleEpisode(
+                idleStart: start,
+                accrualTaskId: taskId,
+                phaseId: currentPhaseId,
+                wasBreakPhase: isBreakPhase))
             wasIdle = true
             return .idleDetected(start: start)
         }
@@ -146,15 +175,20 @@ public final class IdleMonitor {
         if nowIdle { return .none }
 
         // --- Return detected (was idle, now active) ---
-        if wasIdle, let ep = liveEpisode,
-           let taskId = currentTaskId {
+        // currentTaskId != nil is a STILL-TRACKING check, not an attribution
+        // source — attribution comes off the episode now. Keep it: without it, a
+        // "return" observed after the session has stopped would close the episode
+        // and build segments for a session that no longer exists, instead of
+        // leaving it for stop() to discard as unclassifiable. Not dead code.
+        if wasIdle, let ep = liveEpisode, currentTaskId != nil {
             ep.returnTime = now
+            // Only armBoundary and breakTaskId come from the return tick: the arm
+            // legitimately happens DURING the episode so it must be current, and
+            // the break row is a stable registry entry. Everything about what was
+            // accruing is read off the episode — see IdleEpisode.
             ep.segments = buildSegments(
                 episode: ep, now: now,
                 armBoundary: armBoundary,
-                taskId: taskId,
-                phaseId: currentPhaseId,
-                isBreakPhase: isBreakPhase,
                 breakTaskId: breakTaskId)
             wasIdle = false
             let unresolved = ep.unresolvedSegments
@@ -311,11 +345,15 @@ public final class IdleMonitor {
     private func buildSegments(episode ep: IdleEpisode,
                                now: Date,
                                armBoundary: Date?,
-                               taskId: Int64,
-                               phaseId: String,
-                               isBreakPhase: Bool,
                                breakTaskId: Int64) -> [IdleSegment] {
         var segs: [IdleSegment] = []
+
+        // Read the accrual context off the EPISODE, never off the return tick.
+        // Passing these in was what let a same-tick return-and-switch attribute
+        // the segment to a task that never accrued it.
+        let taskId = ep.accrualTaskId
+        let phaseId = ep.phaseId
+        let isBreakPhase = ep.wasBreakPhase
 
         // armBoundary is the freeze boundary if the caller knows one: the deadline
         // while .tracking, or armedAt while .armed. nil means "no boundary known",
