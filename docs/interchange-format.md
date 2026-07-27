@@ -160,21 +160,48 @@ the semantics below. A JSON/CSV reader must decode to the same intermediate
 representation the YAML reader produces and hand off to the shared upsert. Do
 **not** write a second upsert path — that is how the two silently diverge.
 
-Restating the rules the loader enforces, so a reviewer can check the handoff:
+Restating the rules the loader enforces, so a reviewer can check the handoff.
+Note the two branches are **not** symmetric: description is an identity key only
+*among provisional rows*. A description shared with a keyed row does not match.
 
-1. A record with a `jira_key` matches an existing entry **by key** → description
-   updated if changed, otherwise no-op.
-2. A record with no `jira_key` matches an existing entry **by description** →
-   no-op.
-3. A record with a `jira_key` whose **description** matches an existing
-   *provisional* entry → **promotion**. Appends a `known_task_promote` event.
-   Existing bindings follow automatically, because bindings reference the
-   registry `id`, never a key string (`CLAUDE.md` invariant 5).
-4. No match → insert.
-5. Entries **absent** from the file are left untouched. Import never retires and
+**Record WITH a `jira_key`:**
+
+1. Match an existing entry **by key** → description updated in place if changed,
+   otherwise no-op. (Description is a plain label, not history, so this is the
+   one permitted in-place update — it is invisible to the event overlay.)
+2. Else match a **provisional** entry by exact description → **promotion**.
+   Appends a `known_task_promote` event. Existing bindings follow automatically,
+   because bindings reference the registry `id`, never a key string
+   (`CLAUDE.md` invariant 5).
+3. Else insert a new keyed, non-provisional entry.
+
+**Record WITHOUT a `jira_key`:**
+
+4. Match a **provisional** entry by exact description → no-op. A keyed entry
+   with the same description is *not* a match, and the record inserts a new
+   provisional row alongside it.
+5. Else insert a new provisional entry.
+
+**Both branches:**
+
+6. Entries **absent** from the file are left untouched. Import never retires and
    never deletes. Retiring stays an explicit `timetrack known retire`.
-6. An ambiguous match (two entries sharing a description) is a hard error
-   naming both, consistent with the YAML loader.
+7. Two ambiguity errors, both hard failures naming the conflicting registry ids:
+   `ambiguousJiraKey` when a `jira_key` matches multiple registry rows (there is
+   no UNIQUE constraint, so duplicates can pre-exist via the CLI), and
+   `ambiguousProvisionalDescription` when a description matches multiple
+   *provisional* rows. Duplicate descriptions across a keyed and a provisional
+   row are **not** ambiguous and must not error.
+8. Within-file validation runs before any write, matching the YAML parser: empty
+   or whitespace-only `description` is an error; a `jira_key` repeated within the
+   file is an error; a description repeated among *provisional* records in the
+   file is an error. The same description may appear once keyed and once
+   provisional without colliding.
+9. Ingest is single-pass over a snapshot that is **kept in sync as it goes** — a
+   row promoted earlier in the pass must appear non-provisional to later records,
+   or idempotency breaks (a subsequent keyless record for the same description
+   would spuriously re-insert). Reusing the loader gets this for free; it is
+   called out because it is the specific trap a reimplementation falls into.
 
 **Round-trip guarantee (acceptance criterion).** For any registry state:
 
@@ -331,10 +358,19 @@ timetrack import worklog FILE [--format auto|json|csv] [--dry-run]
 
 ### 6.2 `--dry-run`
 
-Required on both import commands. Prints the diff that *would* be applied —
-inserts, promotions, description updates, no-ops — and changes nothing. This is
-what lets a user trust a script they wrote against a real `events.db`. It should
-be the first thing the reference scripts demonstrate.
+**Both import commands must implement this flag** — it is not optional to build.
+Passing it is the user's choice: `import` without `--dry-run` applies changes, as
+the synopsis in §6 shows. The CLI does *not* default to dry-run.
+
+With the flag, the command prints the diff that *would* be applied — inserts,
+promotions, description updates, no-ops — and changes nothing. This is what lets
+a user trust a script they wrote against a real `events.db`, and it should be the
+first thing the reference scripts demonstrate.
+
+Note the different default in §8: the *reference scripts* default to dry-run and
+require an explicit `--apply`, because they are examples a user runs before
+understanding them. The CLI is the primitive and behaves conventionally; the
+scripts are the guard rail.
 
 ### 6.3 `export events`
 
