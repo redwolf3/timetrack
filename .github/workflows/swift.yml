@@ -45,5 +45,8 @@ jobs:
       # threshold, never fails the build. Glance at "KIT COVERAGE" across PRs
       # to spot regressions. App target excluded (SwiftUI bodies inflate the
       # denominator; the app layer holds no business logic).
+      # continue-on-error keeps this trend-only: a broken summary (missing
+      # profdata, llvm-cov drift) must never fail an otherwise-green build.
       - name: Coverage summary
-        run: ./tools/coverage-summary.sh
+        continue-on-error: true
+        run: bash tools/coverage-summary.sh

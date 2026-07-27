@@ -11,6 +11,8 @@
 #   - Sources/TimeTrackApp is excluded deliberately: SwiftUI view bodies inflate
 #     the denominator meaninglessly, and the app layer holds no business logic
 #     (CLAUDE.md invariant 3). timetrack-cli's main.swift likewise (thin shim).
+#   - Sources/SQLiteSnapshotStubs is excluded: a C shim target compiled into
+#     TimeTrackKit but not kit logic — it would skew the trend number.
 #
 # Works on macOS (xcrun, .xctest bundle) and Linux CI (bare llvm-cov, flat binary).
 set -euo pipefail
@@ -50,7 +52,7 @@ else
 fi
 
 # Everything except the two logic targets is ignored (regex on file paths).
-IGNORE='(Tests/|\.build/|Sources/TimeTrackApp/|Sources/timetrack-cli/)'
+IGNORE='(Tests/|\.build/|Sources/TimeTrackApp/|Sources/timetrack-cli/|Sources/SQLiteSnapshotStubs/)'
 
 REPORT="$("${LLVM_COV[@]}" report "$BINARY" \
     -instr-profile="$PROFDATA" \
