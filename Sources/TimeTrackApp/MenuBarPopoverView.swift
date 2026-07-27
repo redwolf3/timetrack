@@ -35,6 +35,14 @@ struct MenuBarPopoverView: View {
 
             Divider()
 
+            // ── Unclassified idle time (#61) ───────────────────────────────
+            // Near the top, above the task list, so a pending decision is
+            // visible without scrolling. Non-modal (DESIGN.md §Escalation).
+            if !appState.pendingIdleSegments.isEmpty {
+                IdleClassificationView()
+                Divider()
+            }
+
             // ── Stop (directly under the tracking bar, only while active) ───
             if !appState.activeTaskName.isEmpty {
                 stopRow

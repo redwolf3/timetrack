@@ -33,6 +33,47 @@ public final class Tracker {
     public private(set) var profiles: [Profile] = []
     public private(set) var todaySeconds: [Int64: Int] = [:]  // taskId -> sec
 
+    // Idle segments awaiting an explicit user classification. Observable state
+    // rather than an Effect: this is a list to RENDER (and to keep rendering
+    // until the user decides), not a fire-and-forget side effect like a sound.
+    // Aggregated across every outstanding episode, in time order — see
+    // refreshPendingIdleSegments() for the single write site.
+    public private(set) var pendingIdleSegments: [IdleSegment] = []
+
+    // Whether .toBreak is a resolution the store can actually honour. False when
+    // the registry has no synthetic break row, in which case
+    // resolveIdleSegment(.toBreak) no-ops — so the app must not offer the choice.
+    //
+    // Derived from the in-memory `tasks` cache, NOT from store.breakTaskId(): this
+    // is a per-frame GATE — the app re-evaluates it on its 1 Hz refresh while
+    // rendering the classification section — so it must not hit the DB every
+    // second (tick() already reads breakTaskId() once per second for segmentation).
+    //
+    // This is deliberately NOT duplicated logic against breakTaskIdOrNil below:
+    // the cheap gate and the authoritative resolution are genuinely different jobs.
+    //   * gate    — "should the UI offer Break at all?" Answered from cache,
+    //               evaluated constantly, wrong-by-staleness is harmless.
+    //   * resolve — must name the EXACT row segmentation used (tick() feeds
+    //               store.breakTaskId() into IdleMonitor), runs once per user
+    //               click, so re-reading the DB is free and correctness-relevant.
+    // Do not "simplify" one into the other.
+    //
+    // Store.ensureBreakTask() runs inside Store.init, i.e. strictly before
+    // Tracker.init loads `tasks`, so the cache can never be missing the break row
+    // at startup. If the two ever did disagree (row removed underneath us),
+    // resolveIdleSegment(.toBreak) no-ops rather than writing an FK-invalid
+    // taskId — see its guard.
+    public var canClassifyAsBreak: Bool { tasks.contains { $0.category == "break" } }
+
+    // The synthetic break task's id, or nil for Store's "-1 = no break row"
+    // sentinel. Store-backed on purpose (see canClassifyAsBreak above).
+    // Private: callers say what they MEAN (.toBreak) and let the kit
+    // resolve it, so no "break" category literal or -1 sentinel leaks outward.
+    private var breakTaskIdOrNil: Int64? {
+        let id = (try? store.breakTaskId()) ?? -1
+        return id == -1 ? nil : id
+    }
+
     // The wall-clock time when the current tracking phase actually began.
     // Reset on start(), advance(), and extend() — any event that starts a new
     // phase interval. NOT reset on switchTo() when a task switch preserves the
@@ -128,13 +169,23 @@ public final class Tracker {
         }
     }
 
+    // Test seam, mirroring tick(at:)'s test-only visibility: stops the 1 Hz Timer
+    // so a test can drive tick(at:) on a fully synthetic clock. Without this, a
+    // test that suspends (awaiting effectStream) lets the RunLoop fire real ticks
+    // stamped Date(), interleaving them with the synthetic ones and making
+    // exact-count assertions about escalation flaky.
+    func disableTickLoopForTesting() {
+        tickTimer?.invalidate()
+        tickTimer = nil
+    }
+
     // Drives one tick.  Production path: called by the 1Hz Timer with Date().
     // Test path: call tick(at:) with a synthetic date to exercise phase expiry
     // without waiting for wall-clock time (the Timer never fires in tests).
     func tick(at now: Date = Date()) {
         // Phase-expiry check (always runs regardless of idle state).
         if case let .tracking(taskId, phase, deadline) = state, now >= deadline {
-            armPhase(taskId: taskId, phase: phase)
+            armPhase(taskId: taskId, phase: phase, at: now)
         }
 
         // Idle detection. Only meaningful when a task is active; idleMonitor
@@ -160,7 +211,16 @@ public final class Tracker {
             case let .armed(_, phase, _, armedAt):
                 phaseId = phase.id
                 isBreakPhase = phase.accrueAs == "break"
-                armBoundary = nil  // already armed; whole idle is overrun
+                // armedAt IS the freeze boundary — the instant the cycle stopped
+                // at the unacked arm. Whether it SPLITS the episode depends on
+                // whether it falls inside [idleStart, return], and that is
+                // buildSegments' decision, not ours. Passing nil here (the old
+                // behaviour) asserted "the whole episode is overrun", which is
+                // only true when the phase was already armed before idle began —
+                // and it silently broke the strict in-window break rule for an
+                // episode that armed mid-way, prompting the user to classify
+                // break time DESIGN.md says must auto-resolve.
+                armBoundary = armedAt
                 phaseArmedAt = armedAt
             }
 
@@ -187,24 +247,45 @@ public final class Tracker {
             switch signal {
             case .none:
                 break
-            case .idleDetected:
-                // Phase clock freezes; no state transition needed — the
-                // segment model tracks idle separately. A future phase can
-                // consume the idle via idle_resolve events (Phase 6).
-                break
-            case let .returned(segments):
-                // Phase 5 stopgap: immediately resolve all segments so the
-                // episode clears and the escalation loop does not fire.
-                // This discards idle classification data — identical to the
-                // break-inPhase auto-resolve path, and explicitly provisional
-                // until Phase 6 wires the resolution UI and emits idle_resolve
-                // events for non-break segments.
-                // WITHOUT this, every idle-return produces an infinite escalation
-                // storm (sound effect every tick) because fullyResolved stays
-                // false and the escalation block fires on every 1Hz tick.
-                for seg in segments {
-                    idleMonitor.resolveSegment(seg.id)
+            case let .idleDetected(start):
+                // Phase clock freezes; no state transition needed — the segment
+                // model tracks idle separately. Mark the episode's opening in the
+                // log so the gap is visible even if the app dies before the user
+                // classifies it.
+                //
+                // ts is IDLE-START (now − idleSeconds), not detection time — the
+                // locked invariant. Store.append only auto-stamps when ts == 0, so
+                // a real timestamp is honoured verbatim. Back-dating is safe:
+                // idle_gap is a timeline no-op in Store.nextActiveTask, so it can
+                // never reorder the accrual walk.
+                //
+                // try? (unlike the do/catch on idle_resolve below) is deliberate:
+                // idle_gap is purely informational, so losing one to a transient
+                // write failure cannot corrupt a report — the episode is still
+                // tracked in memory and its segments will still be classified.
+                // Losing an idle_resolve would lose the correction itself, which
+                // is why that path refuses to mark the segment resolved.
+                if let taskId {
+                    try? store.append(Event(
+                        id: nil,
+                        ts: Int64(start.timeIntervalSince1970 * 1000),
+                        type: EventType.idleGap.rawValue,
+                        taskId: taskId, prevTaskId: nil,
+                        phaseId: phaseId.isEmpty ? nil : phaseId,
+                        profileName: profileName,
+                        extendMin: nil, comment: nil))
                 }
+            case .returned:
+                // Segments now legitimately persist UNRESOLVED until the user
+                // classifies them (resolveIdleSegment). Nothing is auto-credited:
+                // silently keeping idle time on the task that happened to be active
+                // is exactly the bug this path used to have.
+                //
+                // Escalation gating on `fullyResolved` is therefore honest — the
+                // ramp nags precisely while a real decision is outstanding, and it
+                // is presence-gated + rung-shaped, so an unresolved segment produces
+                // a bounded ladder of cues, not one per tick.
+                break
             case let .escalate(rung):
                 // Surface the escalation effect so the app can play a sound.
                 // rung.sound is optional (rungs may be notification-only).
@@ -229,7 +310,69 @@ public final class Tracker {
             }
         }
 
+        refreshPendingIdleSegments()
         refreshToday()
+    }
+
+    // Single write site for pendingIdleSegments. The episodes are the source of
+    // truth; this only mirrors them so the app never reaches into IdleMonitor.
+    private func refreshPendingIdleSegments() {
+        pendingIdleSegments = idleMonitor.pendingSegments
+    }
+
+    // Classify one pending idle segment.
+    //
+    // There is deliberately no fallback: an id that is unknown, already resolved,
+    // or belonged to an episode stop() discarded before it returned is a NO-OP.
+    // That guard is what stops a resolve racing a stop() from resurrecting a dead
+    // episode and writing an idle_resolve with the wrong task/phase/interval.
+    public func resolveIdleSegment(_ id: UUID, as resolution: IdleResolution) {
+        guard let seg = idleMonitor.pendingSegments.first(where: { $0.id == id })
+        else { return }
+
+        // Exhaustive — a new IdleResolution case must be handled here, not
+        // silently defaulted into some other classification.
+        let target: Int64?
+        switch resolution {
+        case .keepOnOriginal:
+            // Writes a resolve that nets to zero in the report. That is the point:
+            // "I checked, it really was this task" is a decision worth recording
+            // in the append-only log, and it clears the escalation.
+            target = seg.originalTaskId
+        case .toBreak:
+            // No break row ⇒ no-op rather than an idle_resolve carrying the -1
+            // sentinel, which would violate the events.taskId foreign key (the
+            // throw would be swallowed and the segment silently lost). The app
+            // gates the choice on canClassifyAsBreak; this is the kit's backstop.
+            guard let breakId = breakTaskIdOrNil else { return }
+            target = breakId
+        case let .moveTo(taskId):
+            target = taskId
+        case .discard:
+            target = nil
+        }
+
+        // Append FIRST, and only mark the segment resolved if the write actually
+        // landed. If persistence fails the segment must stay pending so escalation
+        // keeps nagging — marking it resolved on a failed write would silently lose
+        // the user's correction and leave the time miscredited forever.
+        do {
+            _ = try store.append(Event(
+                id: nil, ts: 0, type: EventType.idleResolve.rawValue,
+                // taskId = the chosen target (nil = discard); prevTaskId = the task
+                // the base timeline walk attributed this interval to. Store.report's
+                // second pass subtracts from prevTaskId and adds to taskId.
+                taskId: target, prevTaskId: seg.originalTaskId,
+                phaseId: seg.phaseId, profileName: profileName,
+                extendMin: nil, comment: nil,
+                rangeStart: Int64(seg.start.timeIntervalSince1970 * 1000),
+                rangeEnd: Int64(seg.end.timeIntervalSince1970 * 1000)))
+        } catch {
+            return
+        }
+
+        idleMonitor.resolveSegment(id)
+        refreshPendingIdleSegments()
     }
 
     private func refreshToday() {
@@ -302,10 +445,15 @@ public final class Tracker {
             taskId: nil, prevTaskId: currentTaskId(),
             phaseId: nil, profileName: profileName,
             extendMin: nil, comment: nil))
-        // Discard any in-flight idle episode: once the session ends there is no
-        // task to attribute it to, so carrying it into the next session would
-        // emit idle_resolve events with the wrong taskId, phaseId, and interval.
-        idleMonitor.reset()
+        // Discard only the still-OPEN idle episode: it has no return time, so its
+        // extent is unknown and it is definitionally unclassifiable once the
+        // session ends. Episodes the user has already returned from survive the
+        // stop with their unresolved segments intact — their ranges and original
+        // task are fully determined, so dropping them would silently bill that
+        // idle time to the original task and make Stop an escape hatch from the
+        // escalation ramp.
+        idleMonitor.discardOpenEpisode()
+        refreshPendingIdleSegments()
         iterator?.reset()
         state = .idle
         activeTask = nil
@@ -313,7 +461,12 @@ public final class Tracker {
 
     // Called from tick() when timer expires. Logs phase_arm, emits the sound
     // effect for the app to play, accrual continues against current task.
-    private func armPhase(taskId: Int64, phase: Phase) {
+    //
+    // `now` is the TICK's clock, not Date(). armedAt is no longer just flowArm
+    // ramp bookkeeping — it is the freeze boundary IdleMonitor splits an idle
+    // episode on, so it must agree with the clock the rest of the tick uses.
+    // (In production they are the same value; the tick is called with Date().)
+    private func armPhase(taskId: Int64, phase: Phase, at now: Date) {
         guard let iter = iterator else { return }
         // peekNext() is exactly what advance() transitions into from here: both
         // resolve through the same phasesForCurrentCycle()/wrap logic, so this is
@@ -330,7 +483,7 @@ public final class Tracker {
             nextPhaseId: nextPhase.id))
 
         effectContinuation.yield(.playSound(phase.onArm.sound))
-        state = .armed(taskId: taskId, phase: phase, nextPhase: nextPhase, armedAt: Date())
+        state = .armed(taskId: taskId, phase: phase, nextPhase: nextPhase, armedAt: now)
     }
 
     public func advance(comment: String? = nil) {

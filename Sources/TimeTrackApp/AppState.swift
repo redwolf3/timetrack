@@ -11,6 +11,30 @@ enum AppStateError: Error {
     case taskNotFoundAfterInsert(name: String)
 }
 
+// One selectable "Move to …" target for an idle segment.
+struct IdleMoveTarget: Identifiable, Equatable {
+    let id: Int64
+    let name: String
+}
+
+// App-layer view model for one unresolved idle segment (#61).
+//
+// Every label AND every choice is precomputed here so IdleClassificationView
+// renders strings and calls actions, nothing else (CLAUDE.md invariant 3 — which
+// choices are valid classification targets is a domain rule, not layout, so the
+// view must not be filtering task lists). Equatable so AppState can skip the
+// assignment when the 1 Hz refresh produces an identical list, avoiding a
+// pointless objectWillChange every second.
+struct IdleSegmentItem: Identifiable, Equatable {
+    let id: UUID                 // IdleSegment.id — the kit's resolve handle
+    let timeRangeLabel: String   // "14:05 – 14:32"
+    let durationLabel: String    // "27m"
+    let kindLabel: String        // "In phase" / "Overrun"
+    let originalTaskName: String // for the "Keep on …" label
+    let offersBreak: Bool        // false when the registry has no break task
+    let moveTargets: [IdleMoveTarget]
+}
+
 // Single @MainActor ObservableObject that mediates between TimeTrackKit and
 // all views. Views read @Published properties and call public methods; they
 // contain zero conditional logic about tracker state. All TrackerState
@@ -61,6 +85,12 @@ final class AppState: ObservableObject {
 
     // Today totals (taskId -> seconds) for row annotations
     @Published var todaySeconds: [Int64: Int] = [:]
+
+    // Idle segments awaiting classification (#61). Non-empty ⇒ the popover shows
+    // the IdleClassificationView section. Mirrored from tracker.pendingIdleSegments.
+    // Deliberately NOT cleared on stop: segments the user has returned from stay
+    // classifiable after Stop (see Tracker.stop).
+    @Published private(set) var pendingIdleSegments: [IdleSegmentItem] = []
 
     // Launch-at-login state. Reflects SMAppService.mainApp.status; false when
     // running as a bare executable (no bundle id) since SMAppService is a no-op
@@ -263,6 +293,16 @@ final class AppState: ObservableObject {
                     // task rows show current totals throughout a phase, not just at
                     // state transitions.
                     self.todaySeconds = self.tracker.todaySeconds
+                    // Idle segments appear mid-phase (the kit's 1 Hz tick opens
+                    // and closes episodes), so polling here is what makes the
+                    // classification section show up without a state transition.
+                    // Cheap: the assignment is skipped unless the list changed.
+                    // Skipping this while stopped is correct even though pending
+                    // segments now SURVIVE a stop: no new episode can open while
+                    // idle, the stop transition itself rebuilt the list via
+                    // updatePublished, and resolving a segment rebuilds it
+                    // explicitly. So nothing can change the list at rest.
+                    self.rebuildIdleSegmentItems()
                 }
             }
         }
@@ -356,6 +396,9 @@ final class AppState: ObservableObject {
         // Refresh task list and profiles from tracker (they change rarely).
         tasks = tracker.tasks.filter { $0.category != "break" }
         refreshProfilePublished()
+        // Outside the switch on purpose: the .idle branch must NOT clear the list.
+        // Unresolved segments from a returned episode outlive the stop.
+        rebuildIdleSegmentItems()
     }
 
     // Derives remainingSeconds / phaseFraction / meterColor from the current
@@ -491,6 +534,96 @@ final class AppState: ObservableObject {
 
     func logInterruption(comment: String) {
         tracker.logInterruption(comment: comment)
+    }
+
+    // MARK: - Idle classification (#61)
+
+    // Locale-aware "2:05 PM" / "14:05". Cached: DateFormatter construction is
+    // expensive and this runs on the 1 Hz refresh.
+    private static let idleTimeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .none
+        f.timeStyle = .short
+        return f
+    }()
+
+    // Maps the kit's pending segments into render-ready view models, choices and
+    // all. Assigns only on an actual change so the 1 Hz caller doesn't fire
+    // objectWillChange every second (IdleSegmentItem is Equatable for this).
+    private func rebuildIdleSegmentItems() {
+        // Nothing pending is the common case (this runs on the 1 Hz refresh), so
+        // do no work at all then — but CLEAR first: the last segment being resolved
+        // is exactly the transition where the kit's list goes empty while ours
+        // still holds the row, and returning early without clearing would strand
+        // that row on screen forever. Still change-guarded, so the steady empty
+        // state fires no objectWillChange.
+        guard !tracker.pendingIdleSegments.isEmpty else {
+            if !pendingIdleSegments.isEmpty { pendingIdleSegments = [] }
+            return
+        }
+
+        // The already-published, user-selectable task list (the synthetic break
+        // row is filtered out of it) — Break is offered as its own choice, via
+        // the kit's canClassifyAsBreak rather than any category matching here.
+        let selectable = tasks
+        let canBreak = tracker.canClassifyAsBreak
+
+        let items: [IdleSegmentItem] = tracker.pendingIdleSegments.map { seg in
+            // tracker.tasks (not the published `tasks`) — the original task may be
+            // the break task, which the published list filters out.
+            let name = tracker.tasks.first(where: { $0.id == seg.originalTaskId })?.name
+                ?? "Unknown task"
+            let range = "\(Self.idleTimeFormatter.string(from: seg.start))"
+                + " – \(Self.idleTimeFormatter.string(from: seg.end))"
+            // "Move to" means move somewhere ELSE; keeping it on the original is
+            // the separate Keep choice.
+            let targets = selectable
+                .filter { $0.id != seg.originalTaskId }
+                .compactMap { t in t.id.map { IdleMoveTarget(id: $0, name: t.name) } }
+            return IdleSegmentItem(
+                id: seg.id,
+                timeRangeLabel: range,
+                durationLabel: formatDuration(Int(seg.end.timeIntervalSince(seg.start))),
+                kindLabel: Self.kindLabel(for: seg.kind),
+                originalTaskName: name,
+                // Break is offered only for segments that did NOT originate in a
+                // break phase. During a break phase the accruing task already IS
+                // the synthetic break task, so buildSegments sets originalTaskId
+                // to it — .toBreak would resolve to the same id as
+                // .keepOnOriginal and write an identical net-zero idle_resolve.
+                // Two buttons, one effect ("Keep on Break" / "Break"), is noise.
+                // The kit stays permissive (a net-zero resolve is harmless); this
+                // is the app's gate. Segments that can reach here in that state:
+                // the overrun half of a break episode, and the single-segment
+                // collapse when the phase armed before idle began — the break
+                // inPhase half auto-resolves at build time and never prompts.
+                offersBreak: canBreak && !seg.wasBreakPhase,
+                moveTargets: targets)
+        }
+        if items != pendingIdleSegments { pendingIdleSegments = items }
+    }
+
+    // Exhaustive switch (no default) so a new IdleSegment.Kind is a compile error
+    // here rather than an unlabelled row.
+    private static func kindLabel(for kind: IdleSegment.Kind) -> String {
+        switch kind {
+        case .inPhase: return "In phase"
+        case .overrun: return "Overrun"
+        }
+    }
+
+    // Classify one pending idle segment. The kit appends the idle_resolve, maps
+    // the resolution onto a concrete task, and owns the "is this segment still
+    // resolvable" guard; this only mirrors the result back into published state.
+    func resolveIdleSegment(_ id: UUID, as resolution: IdleResolution) {
+        tracker.resolveIdleSegment(id, as: resolution)
+        rebuildIdleSegmentItems()
+        // Last segment cleared: re-derive the icon now. The escalation ramp tinted
+        // it red via .setIconColor, and that tint otherwise lingers until the next
+        // state transition — which could be many minutes away.
+        if pendingIdleSegments.isEmpty {
+            updatePublished(from: tracker.state)
+        }
     }
 
     // MARK: - History (Phase 6B)
