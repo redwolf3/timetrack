@@ -74,9 +74,12 @@ struct MenuBarPopoverView: View {
             // a concrete number to report, so it collapsed to ~0pt regardless of
             // how many tasks were loaded. Computing an exact height from the row
             // count (capped at the same 260pt) gives it a real number to report,
-            // so the window sizes to fit the rows and scrolls past the cap.
+            // so the window sizes to fit the rows and scrolls past the cap. With
+            // that explicit height in place, LazyVStack now has a bounded region
+            // to lay out within, so it's safe again (and avoids building every
+            // off-screen row up front for longer task lists).
             ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
+                LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(appState.tasks, id: \.id) { task in
                         TaskRowView(task: task)
                     }
