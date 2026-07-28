@@ -5,6 +5,17 @@ import TimeTrackKit
 // Disambiguate Swift.Task concurrency from TimeTrackKit.Task data model.
 private typealias AsyncTask = _Concurrency.Task
 
+// Reports a row's actual rendered height up to the task-list ScrollView, so
+// its .frame(height:) can track TaskRowView's real size (font, Dynamic Type,
+// padding) instead of a static guess that would drift out from under it.
+private struct TaskRowHeightPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        // Every row reports the same height; any non-zero one will do.
+        if value == 0 { value = nextValue() }
+    }
+}
+
 // Root popover content. ~280pt wide, up to ~400pt tall.
 // Delegates all state reads to @EnvironmentObject AppState — no logic here.
 struct MenuBarPopoverView: View {
@@ -27,10 +38,15 @@ struct MenuBarPopoverView: View {
     // Reconcile panel: toggled by the "Reconcile" disclosure row.
     @State private var showReconcile: Bool = false
 
-    // Estimated TaskRowView height (vertical padding × 2 + .body line height),
-    // used to give the task-list ScrollView a concrete, content-driven height
-    // to report — see the "Task list" comment in body for why this matters.
-    private static let taskRowHeight: CGFloat = 32
+    // First-paint fallback for the task-list height formula, used only until
+    // TaskRowHeightPreferenceKey reports the real measured row height (a
+    // fixed guess would drift from TaskRowView's actual size under Dynamic
+    // Type or padding/font changes — see the "Task list" comment in body).
+    private static let taskRowHeightFallback: CGFloat = 32
+
+    // Real measured TaskRowView height, filled in once the first row lays
+    // out. nil only until then.
+    @State private var measuredTaskRowHeight: CGFloat? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -77,15 +93,31 @@ struct MenuBarPopoverView: View {
             // so the window sizes to fit the rows and scrolls past the cap. With
             // that explicit height in place, LazyVStack now has a bounded region
             // to lay out within, so it's safe again (and avoids building every
-            // off-screen row up front for longer task lists).
+            // off-screen row up front for longer task lists). The per-row height
+            // is measured from the first laid-out row rather than hard-coded, so
+            // it tracks TaskRowView's actual size instead of drifting from it.
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(appState.tasks, id: \.id) { task in
                         TaskRowView(task: task)
+                            .background(
+                                GeometryReader { geo in
+                                    Color.clear.preference(
+                                        key: TaskRowHeightPreferenceKey.self,
+                                        value: geo.size.height
+                                    )
+                                }
+                            )
                     }
                 }
             }
-            .frame(height: min(CGFloat(appState.tasks.count) * Self.taskRowHeight, 260))
+            .onPreferenceChange(TaskRowHeightPreferenceKey.self) { height in
+                if height > 0 { measuredTaskRowHeight = height }
+            }
+            .frame(height: min(
+                CGFloat(appState.tasks.count) * (measuredTaskRowHeight ?? Self.taskRowHeightFallback),
+                260
+            ))
 
             Divider()
 
