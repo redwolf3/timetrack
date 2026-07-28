@@ -27,6 +27,11 @@ struct MenuBarPopoverView: View {
     // Reconcile panel: toggled by the "Reconcile" disclosure row.
     @State private var showReconcile: Bool = false
 
+    // Estimated TaskRowView height (vertical padding × 2 + .body line height),
+    // used to give the task-list ScrollView a concrete, content-driven height
+    // to report — see the "Task list" comment in body for why this matters.
+    private static let taskRowHeight: CGFloat = 32
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
 
@@ -62,14 +67,22 @@ struct MenuBarPopoverView: View {
             }
 
             // ── Task list ──────────────────────────────────────────────────
+            // ScrollView has no intrinsic content size of its own: under
+            // .menuBarExtraStyle(.window), the window's height is derived from
+            // the root view's IDEAL size, and a `.frame(maxHeight:)` clamp only
+            // bounds that ideal size from above — it doesn't give the ScrollView
+            // a concrete number to report, so it collapsed to ~0pt regardless of
+            // how many tasks were loaded. Computing an exact height from the row
+            // count (capped at the same 260pt) gives it a real number to report,
+            // so the window sizes to fit the rows and scrolls past the cap.
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 0) {
                     ForEach(appState.tasks, id: \.id) { task in
                         TaskRowView(task: task)
                     }
                 }
             }
-            .frame(maxHeight: 260)
+            .frame(height: min(CGFloat(appState.tasks.count) * Self.taskRowHeight, 260))
 
             Divider()
 
