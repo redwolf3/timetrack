@@ -32,9 +32,16 @@ public enum KnownTasksLoader {
         public let description: String
         public let jiraKey: String?   // nil means provisional (absent or whitespace-only after trim)
 
+        // Normalising here rather than in each decoder makes the invariant hold
+        // by construction: this is a public seam, so a direct caller gets the
+        // same treatment a JSON/CSV/YAML record does. Without it a whitespace-only
+        // jiraKey would be persisted as a real key, contradicting the field
+        // comment above and docs/interchange-format.md §3, which treats a
+        // whitespace-only jira_key as absent.
         public init(description: String, jiraKey: String?) {
-            self.description = description
-            self.jiraKey = jiraKey
+            self.description = description.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmedKey = jiraKey?.trimmingCharacters(in: .whitespacesAndNewlines)
+            self.jiraKey = (trimmedKey?.isEmpty ?? true) ? nil : trimmedKey
         }
     }
 
@@ -402,27 +409,14 @@ public enum KnownTasksLoader {
         }
     }
 
-    // Decodes yaml into the shared [KnownTaskEntry] representation: trims
-    // whitespace (including newlines quoted YAML scalars can carry) and folds a
-    // whitespace-only jiraKey to nil (provisional). Deliberately does NOT run
+    // Decodes yaml into the shared [KnownTaskEntry] representation. Trimming and
+    // the whitespace-only-jiraKey-means-provisional fold live in
+    // KnownTaskEntry.init, so this is pure decode. Deliberately does NOT run
     // business-rule validation — that is `validateWithinFile`, shared by every
-    // source via `ingest(entries:...)`, so this stays pure decode+normalise.
+    // source via `ingest(entries:...)`.
     public static func parse(yaml: String) throws -> [KnownTaskEntry] {
         let decoder = YAMLDecoder()
         let wrapper = try decoder.decode(Wrapper.self, from: yaml)
-
-        return wrapper.knownTasks.map { raw in
-            let description = raw.description.trimmingCharacters(in: .whitespacesAndNewlines)
-
-            // Whitespace-only jiraKey is treated as absent (provisional). The key
-            // is an opaque identifier here — non-JIRA setups are supported, so no
-            // format validation beyond non-emptiness.
-            let jiraKey: String? = raw.jiraKey.flatMap {
-                let t = $0.trimmingCharacters(in: .whitespacesAndNewlines)
-                return t.isEmpty ? nil : t
-            }
-
-            return KnownTaskEntry(description: description, jiraKey: jiraKey)
-        }
+        return wrapper.knownTasks.map { KnownTaskEntry(description: $0.description, jiraKey: $0.jiraKey) }
     }
 }

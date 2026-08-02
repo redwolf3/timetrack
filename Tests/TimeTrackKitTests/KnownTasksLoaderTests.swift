@@ -280,6 +280,29 @@ final class KnownTasksLoaderTests: XCTestCase {
         XCTAssertTrue(try store.knownTasks(activeOnly: false).isEmpty, "rejected entry must not have been inserted")
     }
 
+    // Companion to the test above, for the jiraKey side. ingest(entries:...) is a
+    // public seam, so a direct caller must get the same normalisation a decoded
+    // record does: a whitespace-only jiraKey is *absent*, not a real key
+    // (docs/interchange-format.md §3). KnownTaskEntry.init enforces it, so this
+    // holds for every present and future reader rather than per decoder.
+    func testWhitespaceOnlyJiraKeyFoldsToProvisionalAtThePublicSeamDirectly() throws {
+        let dir = try makeTmpDir()
+        let store = try makeStore(in: dir)
+
+        let entries = [KnownTasksLoader.KnownTaskEntry(description: "  Padded description  ", jiraKey: "   ")]
+        XCTAssertNil(entries[0].jiraKey, "whitespace-only jiraKey must normalise to nil at construction")
+        XCTAssertEqual(entries[0].description, "Padded description", "description must be trimmed at construction")
+
+        let result = try KnownTasksLoader.ingest(entries: entries, into: store, sourceName: "direct.json")
+        XCTAssertEqual(result.changeCount, 1)
+
+        let tasks = try store.knownTasks(activeOnly: false)
+        XCTAssertEqual(tasks.count, 1)
+        XCTAssertTrue(tasks[0].provisional, "must be stored as provisional, not keyed on whitespace")
+        XCTAssertNil(tasks[0].jiraKey)
+        XCTAssertEqual(tasks[0].description, "Padded description", "must not persist surrounding whitespace")
+    }
+
     // MARK: - Test 10: Duplicate jiraKey in file → throws .duplicateJiraKey
 
     func testDuplicateJiraKeyInFileThrows() throws {

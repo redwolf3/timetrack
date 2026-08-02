@@ -177,19 +177,14 @@ public enum KnownTaskCodec {
         }
 
         // jira_key: absent, JSON null, or a string are all valid on the wire.
-        // A whitespace-only string normalises to nil (provisional), matching the
-        // YAML loader's rule (KnownTasksLoader.parse) and §3's null/empty
-        // equivalence. id, provisional, retired, created are read by no one here
-        // — they are export-only / ignored-on-import per §4.1.
-        let jiraKey: String?
-        if let raw = obj["jira_key"] as? String {
-            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            jiraKey = trimmed.isEmpty ? nil : trimmed
-        } else {
-            jiraKey = nil
-        }
-
-        return KnownTasksLoader.KnownTaskEntry(description: description, jiraKey: jiraKey)
+        // KnownTaskEntry.init folds a whitespace-only key to nil (provisional),
+        // per §3's null/empty equivalence — every source gets that for free.
+        // id, provisional, retired, created are read by no one here: they are
+        // export-only / ignored-on-import per §4.1.
+        return KnownTasksLoader.KnownTaskEntry(
+            description: description,
+            jiraKey: obj["jira_key"] as? String
+        )
     }
 
     private static func decodeCSV(_ text: String) throws -> (entries: [KnownTasksLoader.KnownTaskEntry], warnings: [String]) {
@@ -215,9 +210,9 @@ public enum KnownTaskCodec {
             guard !description.isEmpty else {
                 throw CodecError.malformedCSV("row \(rowIndex + 2) has an empty description")
             }
-            let rawKey = row[1].trimmingCharacters(in: .whitespacesAndNewlines)
-            let jiraKey = rawKey.isEmpty ? nil : rawKey
-            entries.append(KnownTasksLoader.KnownTaskEntry(description: description, jiraKey: jiraKey))
+            // An empty jira_key cell means provisional (§3 null/empty
+            // equivalence); KnownTaskEntry.init does that fold for every source.
+            entries.append(KnownTasksLoader.KnownTaskEntry(description: description, jiraKey: row[1]))
         }
         return (entries, warnings)
     }
