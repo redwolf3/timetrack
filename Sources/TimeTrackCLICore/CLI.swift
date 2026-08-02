@@ -735,13 +735,18 @@ private func printKnownTaskDiff(_ result: KnownTasksLoader.IngestResult, dryRun:
     // at the type level (KnownTasksLoader.swift) — under dryRun, a promote/
     // update/no-op may target a row this same input would insert rather than
     // one that already exists, and that row has no id a user could look up.
-    // Fall back to the description/key, which identifies the row either way.
-    func label(_ target: KnownTasksLoader.IngestResult.TargetRow, entry: KnownTasksLoader.KnownTaskEntry) -> String {
+    //
+    // Deliberately does NOT fall back to entry.jiraKey: on a promote, `entry` is
+    // the KEYED record doing the promoting, so using its key would render
+    // "promote: 'ACME-7' → [ACME-7] …" — naming the key being applied instead of
+    // the row receiving it, and implying that row already has a key when the
+    // whole point is that it does not.
+    func label(_ target: KnownTasksLoader.IngestResult.TargetRow) -> String {
         switch target {
         case .existing(let id):
             return "#\(id)"
         case .pending:
-            return entry.jiraKey.map { "'\($0)'" } ?? "'\(entry.description)'"
+            return "(pending)"
         }
     }
 
@@ -753,15 +758,15 @@ private func printKnownTaskDiff(_ result: KnownTasksLoader.IngestResult, dryRun:
             out.writeError("  insert:  \(keyDesc)\(change.entry.description)")
         case .promote(let targetRow):
             promotions += 1
-            let target = label(targetRow, entry: change.entry)
+            let target = label(targetRow)
             out.writeError("  promote: \(target) → [\(change.entry.jiraKey ?? "?")] \(change.entry.description)")
         case .descriptionUpdate(let targetRow, let previous):
             updates += 1
-            let target = label(targetRow, entry: change.entry)
+            let target = label(targetRow)
             out.writeError("  update:  \(target): '\(previous)' → '\(change.entry.description)'")
         case .noOp(let targetRow):
             noOps += 1
-            let target = label(targetRow, entry: change.entry)
+            let target = label(targetRow)
             out.writeError("  no-op:   \(target) \(change.entry.description)")
         }
     }

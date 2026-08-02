@@ -459,6 +459,33 @@ final class KnownTaskDryRunTests: XCTestCase {
         }
     }
 
+    // A promote whose target is a row created earlier in the SAME input must
+    // identify that row as pending, not by the key being applied. `entry` on a
+    // promote is the KEYED record doing the promoting, so labelling the target
+    // with entry.jiraKey rendered "promote: 'ACME-7' → [ACME-7] …" — naming the
+    // key going on rather than the row receiving it, and implying that row
+    // already had a key when the point of a promote is that it did not.
+    func testPendingPromoteTargetIsNotLabelledWithTheIncomingKey() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Row 1 creates a provisional row; row 2 promotes that same row.
+        let csv = """
+        id,jira_key,description,provisional,retired,created
+        ,,Brand new thing,true,false,
+        ,ACME-7,Brand new thing,false,false,
+        """
+        let file = try writeFile(csv, named: "pending.csv", in: dir)
+
+        let out = try runCLI(["import", "known", file.path, "--dry-run"], dataDir: dir)
+        let promoteLine = out.errorLines.first(where: { $0.contains("promote:") })
+        XCTAssertNotNil(promoteLine, out.errorText)
+
+        let target = promoteLine?.components(separatedBy: "→").first ?? ""
+        XCTAssertFalse(target.contains("ACME-7"), "target of a pending promote must not be named by the incoming key: \(promoteLine ?? "")")
+        XCTAssertTrue(target.contains("(pending)"), "pending target must be marked as such: \(promoteLine ?? "")")
+    }
+
     func testRealRunAppliesAndReportsSameCounts() throws {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }

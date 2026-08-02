@@ -414,7 +414,12 @@ public enum KnownTasksLoader {
     // KnownTaskEntry.init, so this is pure decode. Deliberately does NOT run
     // business-rule validation — that is `validateWithinFile`, shared by every
     // source via `ingest(entries:...)`.
-    public static func parse(yaml: String) throws -> [KnownTaskEntry] {
+    // Private, matching TasksLoader.parse: this is a Yams-specific implementation
+    // detail of ingest(from:), not part of the kit's contract. The format-neutral
+    // seam callers are meant to use is ingest(entries:into:sourceName:) — making
+    // this public would commit TimeTrackKit to a YAML decoding API nothing asked
+    // for, which is harder to withdraw later than to add.
+    private static func parse(yaml: String) throws -> [KnownTaskEntry] {
         let decoder = YAMLDecoder()
         let wrapper = try decoder.decode(Wrapper.self, from: yaml)
         return wrapper.knownTasks.map { KnownTaskEntry(description: $0.description, jiraKey: $0.jiraKey) }
