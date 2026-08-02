@@ -33,6 +33,11 @@ public enum KnownTaskCodec {
             case .unknownFormat(let format):
                 return "unknown format '\(format)' (expected '\(KnownTaskCodec.formatName)')"
             case .unsupportedVersion(let version):
+                // Below 1 is malformed, not merely newer than us — saying "supports
+                // up to N" there would imply a future build might accept it.
+                guard version >= 1 else {
+                    return "invalid version \(version) (versions start at 1)"
+                }
                 return "unsupported version \(version) (this build supports up to version \(KnownTaskCodec.supportedVersion))"
             case .malformedJSON(let msg):
                 return "malformed JSON — \(msg)"
@@ -150,7 +155,9 @@ public enum KnownTaskCodec {
             guard let version = obj["version"] as? Int else {
                 throw CodecError.malformedJSON("missing 'version' field")
             }
-            guard version <= supportedVersion else {
+            // Versions are 1-based (§3.1 — a bare top-level array is read as v1),
+            // so 0 and negatives are malformed rather than merely unsupported.
+            guard version >= 1, version <= supportedVersion else {
                 throw CodecError.unsupportedVersion(version)
             }
             guard let arr = obj["records"] as? [Any] else {
@@ -176,15 +183,29 @@ public enum KnownTaskCodec {
             throw CodecError.malformedJSON("record has an empty 'description'")
         }
 
-        // jira_key: absent, JSON null, or a string are all valid on the wire.
+        // jira_key is `string | null` (§4.1); absent, JSON null, and a string are
+        // the only valid encodings. A number or bool must be rejected rather than
+        // silently read as absent — that would import a keyed row as provisional
+        // and quietly drop the user's key. NSNull is how JSONSerialization
+        // represents an explicit null, and is equivalent to absent per §3.
+        let rawKey = obj["jira_key"]
+        let jiraKey: String?
+        switch rawKey {
+        case nil, is NSNull:
+            jiraKey = nil
+        case let string as String:
+            jiraKey = string
+        default:
+            throw CodecError.malformedJSON(
+                "record '\(description)' has a non-string 'jira_key' (expected a string or null)"
+            )
+        }
+
         // KnownTaskEntry.init folds a whitespace-only key to nil (provisional),
         // per §3's null/empty equivalence — every source gets that for free.
         // id, provisional, retired, created are read by no one here: they are
         // export-only / ignored-on-import per §4.1.
-        return KnownTasksLoader.KnownTaskEntry(
-            description: description,
-            jiraKey: obj["jira_key"] as? String
-        )
+        return KnownTasksLoader.KnownTaskEntry(description: description, jiraKey: jiraKey)
     }
 
     private static func decodeCSV(_ text: String) throws -> (entries: [KnownTasksLoader.KnownTaskEntry], warnings: [String]) {

@@ -751,17 +751,17 @@ private func printKnownTaskDiff(_ result: KnownTasksLoader.IngestResult, dryRun:
             inserts += 1
             let keyDesc = change.entry.jiraKey.map { "[\($0)] " } ?? "(provisional) "
             out.writeError("  insert:  \(keyDesc)\(change.entry.description)")
-        case .promote(let existingId):
+        case .promote(let targetRow):
             promotions += 1
-            let target = label(existingId, entry: change.entry)
+            let target = label(targetRow, entry: change.entry)
             out.writeError("  promote: \(target) → [\(change.entry.jiraKey ?? "?")] \(change.entry.description)")
-        case .descriptionUpdate(let id, let previous):
+        case .descriptionUpdate(let targetRow, let previous):
             updates += 1
-            let target = label(id, entry: change.entry)
+            let target = label(targetRow, entry: change.entry)
             out.writeError("  update:  \(target): '\(previous)' → '\(change.entry.description)'")
-        case .noOp(let id):
+        case .noOp(let targetRow):
             noOps += 1
-            let target = label(id, entry: change.entry)
+            let target = label(targetRow, entry: change.entry)
             out.writeError("  no-op:   \(target) \(change.entry.description)")
         }
     }

@@ -342,6 +342,44 @@ final class KnownTaskMalformedInputTests: XCTestCase {
         try assertRejectedWithoutMutation(content, named: "badversion.json")
     }
 
+    // Versions are 1-based (§3.1 reads a bare top-level array as v1), so 0 and
+    // negatives are malformed rather than "newer than this build". Previously the
+    // envelope check was `version <= supportedVersion` only, which let them
+    // through and imported the records.
+    func testVersionBelowOneIsRejected() throws {
+        let zero = #"{"format":"timetrack.known_task","version":0,"records":[{"description":"V zero"}]}"#
+        try assertRejectedWithoutMutation(zero, named: "v0.json")
+
+        let negative = #"{"format":"timetrack.known_task","version":-1,"records":[{"description":"V neg"}]}"#
+        try assertRejectedWithoutMutation(negative, named: "vneg.json")
+    }
+
+    // §4.1 types jira_key as `string | null`. A number or bool must be REJECTED,
+    // not read as absent — silently importing it as provisional would drop the
+    // user's key and leave a row that looks deliberately provisional.
+    func testNonStringJiraKeyIsRejected() throws {
+        let numeric = #"{"format":"timetrack.known_task","version":1,"records":[{"description":"Numeric key","jira_key":12345}]}"#
+        try assertRejectedWithoutMutation(numeric, named: "numkey.json")
+
+        let boolean = #"{"format":"timetrack.known_task","version":1,"records":[{"description":"Bool key","jira_key":true}]}"#
+        try assertRejectedWithoutMutation(boolean, named: "boolkey.json")
+    }
+
+    // An explicit JSON null, by contrast, is valid and means provisional (§3).
+    func testExplicitNullJiraKeyIsAcceptedAsProvisional() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let content = #"{"format":"timetrack.known_task","version":1,"records":[{"description":"Explicit null","jira_key":null}]}"#
+        let file = try writeFile(content, named: "null.json", in: dir)
+        _ = try runCLI(["import", "known", file.path], dataDir: dir)
+
+        let tasks = try openStore(dir).knownTasks(activeOnly: false)
+        XCTAssertEqual(tasks.count, 1)
+        XCTAssertTrue(tasks[0].provisional)
+        XCTAssertNil(tasks[0].jiraKey)
+    }
+
     func testMismatchedCSVHeaderIsRejected() throws {
         try assertRejectedWithoutMutation("a,b,c\n1,2,3\n", named: "bad.csv")
     }

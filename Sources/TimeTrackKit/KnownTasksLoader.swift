@@ -94,9 +94,9 @@ public enum KnownTasksLoader {
 
         public enum Outcome: Equatable {
             case insert
-            case promote(existingId: TargetRow)
-            case descriptionUpdate(id: TargetRow, previous: String)
-            case noOp(id: TargetRow)
+            case promote(target: TargetRow)
+            case descriptionUpdate(target: TargetRow, previous: String)
+            case noOp(target: TargetRow)
         }
 
         public struct Change: Equatable {
@@ -261,9 +261,9 @@ public enum KnownTasksLoader {
                         if let idx = existing.firstIndex(where: { $0.id == id }) {
                             existing[idx].description = entry.description
                         }
-                        changes.append(.init(entry: entry, outcome: .descriptionUpdate(id: targetRow(for: id), previous: row.description)))
+                        changes.append(.init(entry: entry, outcome: .descriptionUpdate(target: targetRow(for: id), previous: row.description)))
                     } else {
-                        changes.append(.init(entry: entry, outcome: .noOp(id: targetRow(for: row.id!))))
+                        changes.append(.init(entry: entry, outcome: .noOp(target: targetRow(for: row.id!))))
                     }
                     continue
                 }
@@ -288,7 +288,7 @@ public enum KnownTasksLoader {
                         existing[idx].jiraKey = jiraKey
                         existing[idx].provisional = false
                     }
-                    changes.append(.init(entry: entry, outcome: .promote(existingId: targetRow(for: id))))
+                    changes.append(.init(entry: entry, outcome: .promote(target: targetRow(for: id))))
                     continue
                 }
 
@@ -307,7 +307,7 @@ public enum KnownTasksLoader {
                     throw ValidationError.ambiguousProvisionalDescription(entry.description, ids: provMatches.compactMap(\.id), source: sourceName)
                 }
                 if let row = provMatches.first {
-                    changes.append(.init(entry: entry, outcome: .noOp(id: targetRow(for: row.id!))))
+                    changes.append(.init(entry: entry, outcome: .noOp(target: targetRow(for: row.id!))))
                     continue
                 }
                 let inserted = dryRun
