@@ -250,13 +250,14 @@ public enum KnownTaskCodec {
         var row: [String] = []
         var field = ""
         var inQuotes = false
+        var fieldWasQuoted = false
         var sawAnyContentInRow = false
 
         let chars = Array(text)
         var i = 0
         let n = chars.count
 
-        func endField() { row.append(field); field = "" }
+        func endField() { row.append(field); field = ""; fieldWasQuoted = false }
         func endRow() { endField(); rows.append(row); row = []; sawAnyContentInRow = false }
 
         while i < n {
@@ -269,6 +270,18 @@ public enum KnownTaskCodec {
                     } else {
                         inQuotes = false
                         i += 1
+                        // Only a delimiter, a row terminator, or EOF may follow a
+                        // closing quote. Anything else (`"quoted"junk`) is
+                        // genuinely ambiguous — there is no way to tell whether
+                        // the user meant the quotes literally or mis-escaped the
+                        // field — so reject rather than guess. Matches Python's
+                        // csv strict mode, the reference reader for the §8
+                        // example scripts.
+                        if i < n, chars[i] != ",", chars[i] != "\n", chars[i] != "\r" {
+                            throw CodecError.malformedCSV(
+                                "unexpected character after a closing quote (expected a comma or end of line)"
+                            )
+                        }
                     }
                 } else {
                     field.append(c)
@@ -278,7 +291,20 @@ public enum KnownTaskCodec {
             }
             switch c {
             case "\"":
-                inQuotes = true
+                // A quote only opens a quoted field at the START of a field.
+                // Mid-field it is a literal character: a hand-written
+                // `Fix "quoted" bug` is unambiguous, and Python's csv preserves
+                // it verbatim in both default and strict modes. Treating it as a
+                // field delimiter silently dropped the quotes — corrupting the
+                // description, which is the identity key for provisional rows
+                // (§4.2 rule 2), so the mangled row would later fail to match
+                // and be re-inserted as a duplicate.
+                if field.isEmpty && !fieldWasQuoted {
+                    inQuotes = true
+                    fieldWasQuoted = true
+                } else {
+                    field.append(c)
+                }
                 sawAnyContentInRow = true
                 i += 1
             case ",":

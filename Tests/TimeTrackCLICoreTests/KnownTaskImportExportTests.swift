@@ -380,6 +380,40 @@ final class KnownTaskMalformedInputTests: XCTestCase {
         XCTAssertNil(tasks[0].jiraKey)
     }
 
+    // A `"` mid-field is a literal character, not a field delimiter. Previously
+    // any quote opened/closed a quoted field, so a hand-written
+    // `Fix "quoted" bug` imported as `Fix quoted bug` — silently dropping the
+    // quotes with exit 0. That corrupts the description, which is the identity
+    // key for provisional rows (§4.2 rule 2), so the mangled row would fail to
+    // match on a later import and be re-inserted as a duplicate. Python's csv
+    // preserves this verbatim in both default and strict modes.
+    func testUnquotedFieldPreservesLiteralQuotes() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let csv = "id,jira_key,description,provisional,retired,created\n,PROJ-1,Fix \"quoted\" bug,false,false,\n"
+        let file = try writeFile(csv, named: "literal.csv", in: dir)
+        _ = try runCLI(["import", "known", file.path], dataDir: dir)
+
+        let tasks = try openStore(dir).knownTasks(activeOnly: false)
+        XCTAssertEqual(tasks.count, 1)
+        XCTAssertEqual(tasks[0].description, "Fix \"quoted\" bug", "literal quotes must survive an unquoted field")
+
+        // And the row must now be idempotent: re-importing reports a no-op
+        // rather than inserting a second, differently-spelled copy.
+        let again = try runCLI(["import", "known", file.path], dataDir: dir)
+        XCTAssertTrue(again.errorText.contains("no-op:"), again.errorText)
+        XCTAssertEqual(try openStore(dir).knownTasks(activeOnly: false).count, 1)
+    }
+
+    // Junk after a closing quote is genuinely ambiguous — literal quotes, or a
+    // mis-escaped field? — so it is rejected rather than guessed at. Matches
+    // Python's csv strict mode ("',' expected after '\"'").
+    func testJunkAfterClosingQuoteIsRejected() throws {
+        let csv = "id,jira_key,description,provisional,retired,created\n,PROJ-2,\"quoted\"junk,false,false,\n"
+        try assertRejectedWithoutMutation(csv, named: "junk.csv")
+    }
+
     func testMismatchedCSVHeaderIsRejected() throws {
         try assertRejectedWithoutMutation("a,b,c\n1,2,3\n", named: "bad.csv")
     }

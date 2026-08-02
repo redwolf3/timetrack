@@ -129,6 +129,17 @@ single empty field) is skipped rather than treated as a malformed one-column
 row — hand-edited files commonly have a trailing or stray blank line, and it
 carries no data to reject.
 
+**Quoting.** A `"` opens a quoted field only at the *start* of a field.
+Encountered mid-field it is a literal character, so a hand-written
+`Fix "quoted" bug` survives verbatim rather than having its quotes silently
+stripped — Python's `csv` reader, the reference implementation for the §8
+example scripts, preserves it identically in both default and strict modes.
+Inside a quoted field, `""` is a literal quote; after the closing quote only a
+comma, a row terminator, or end-of-file may follow. Anything else
+(`"quoted"junk`) is rejected as malformed: there is no way to tell whether the
+author meant the quotes literally or mis-escaped the field, and guessing would
+corrupt a `description`, which is the identity key for provisional rows (§4.2).
+
 **The header row is the version identifier.** There is no `format_version`
 column repeated on every row — that would make the file awkward in awk, pandas,
 and Excel, which is the whole reason CSV is offered. The exact header strings
