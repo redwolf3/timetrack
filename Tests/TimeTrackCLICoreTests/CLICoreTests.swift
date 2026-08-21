@@ -468,6 +468,8 @@ final class CLIResolveOrCreateTaskTests: XCTestCase {
                 break   // correct: system task rejected
             case .usage(let msg):
                 XCTFail("expected .notFound/.message, got .usage(\(msg))")
+            case .gateFailed(let msg):
+                XCTFail("expected .notFound/.message, got .gateFailed(\(msg))")
             }
         }
     }
