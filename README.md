@@ -115,3 +115,30 @@ active. Computed at query time, never stored. See `Store.report(day:)`.
 
 Edits to history: append a correction event, never UPDATE/DELETE. Not exposed
 in v1 UI; manual SQL only.
+
+## Export
+
+```
+timetrack export worklog --from YYYY-MM-DD --to YYYY-MM-DD
+                         [--format json|csv] [--out FILE]
+                         [--by day|key|interval]
+                         [--include-unreconciled]
+                         [--drop-below-sec N] [--min-interval-min N]
+                         [--round-to-min N] [--aggregate-key KEY]
+```
+
+Turns reconciled tracked time into a machine-readable JSON or CSV payload —
+the interchange format's `worklog` record — for JIRA worklog uploaders,
+timesheet bridges, and spreadsheet pipelines. Writes to stdout by default, or
+atomically to `--out FILE`.
+
+Refuses to write unbound or provisional time by default: it prints the
+offending tasks to stderr and exits 2, without writing a file. Pass
+`--include-unreconciled` to downgrade that to a stderr warning and emit the
+unreconciled records anyway (`status: "unbound"` / `"provisional"`,
+`jira_key: null`).
+
+Human-readable CLI output (`report`, `status`, `known list`, `reconcile`, …)
+is explicitly **not** a contract. Only `export`/`import` payloads and CLI
+exit codes are — see `docs/interchange-format.md` for the full field-level
+specification.

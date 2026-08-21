@@ -17,6 +17,15 @@ _Concurrency.Task { @MainActor in
     do {
         try CLI.run(args: Array(CommandLine.arguments.dropFirst()))
     } catch let e as CLIError {
+        // .gateFailed carries its own fully-formatted diagnostic (no "error: "
+        // prefix) and maps to exit 2, distinct from every other CLI failure
+        // (docs/interchange-format.md §6.4) — a wrapper script can tell "you
+        // have unbound time" from "your invocation was wrong" without parsing
+        // stderr text.
+        if case .gateFailed(let message) = e {
+            fputs("\(message)\n", stderr)
+            exit(2)
+        }
         fputs("error: \(e.description)\n", stderr)
         exit(1)
     } catch {

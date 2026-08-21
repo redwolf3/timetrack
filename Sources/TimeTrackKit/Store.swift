@@ -1303,6 +1303,229 @@ public final class Store {
             .sorted { $0.totalSeconds > $1.totalSeconds }
     }
 
+    // MARK: - Worklog export (docs/interchange-format.md §5)
+    //
+    // Unlike reconciledReport (which collapses straight to per-jiraKey totals
+    // across the whole window and hard-fails on any unbound/provisional time),
+    // this preserves per-interval provenance — capture task names, start/end
+    // times, per-day or per-key grouping — and can optionally emit
+    // unreconciled time instead of refusing outright (§5.3's
+    // --include-unreconciled). It is the primitive `export worklog` sits on.
+
+    public enum WorklogGrain: Equatable {
+        case day
+        case key
+        case interval
+    }
+
+    public enum WorklogStatus: String, Equatable {
+        case reconciled
+        case unbound
+        case provisional
+    }
+
+    public struct WorklogRecord {
+        public let date: Date?           // local calendar day; nil for --by key
+        public let started: Date
+        public let ended: Date?          // --by interval only; nil otherwise
+        public let seconds: Int          // normalised — the number to record
+        public let rawSeconds: Int       // pre-normalisation truth (§5.4)
+        public let jiraKey: String?      // nil iff status != .reconciled
+        public let knownTaskId: Int64?
+        public let description: String?
+        public let captureTasks: [String]
+        public let status: WorklogStatus
+    }
+
+    // aggregateKey is accepted for spec parity (§5.4's four normalisation
+    // knobs) and recorded by the caller in the export envelope, but has no
+    // distinct runtime effect here: the aggregate-key roll-up in
+    // reconciledReport only fires through subFifteenResolutions, which export
+    // deliberately never populates in v1 (§5.5 — sub-15 resolution is
+    // per-key interactive judgement, not reproducible from export).
+    public func worklog(
+        from: Date,
+        to: Date,
+        grain: WorklogGrain,
+        includeUnreconciled: Bool,
+        dropBelowSec: Int = 0,
+        minIntervalMin: Int = 0,
+        roundToMin: Int = 0,
+        aggregateKey: String? = nil
+    ) throws -> [WorklogRecord] {
+        // Gate: same two conditions as reconciledReport, checked on raw window
+        // totals BEFORE normalisation (§5.3) — a task does not escape the gate
+        // by rounding to zero. --include-unreconciled downgrades this to a
+        // no-op here; the CLI layer prints the same lists as a warning instead.
+        if !includeUnreconciled {
+            let unbound = try unreconciled(from: from, to: to)
+            guard unbound.isEmpty else { throw ReconcileError.unbound(unbound) }
+            let provisional = try provisionalWithTime(from: from, to: to)
+            guard provisional.isEmpty else { throw ReconcileError.provisional(provisional) }
+        }
+
+        let binds = try bindings()
+        // activeOnly:false — same rationale as reconciledReport: historical time
+        // bound to a since-retired Known Task must still resolve to its real key.
+        let overlaid = try knownTasks(activeOnly: false)
+        let knownById = Dictionary(uniqueKeysWithValues: overlaid.compactMap { k -> (Int64, KnownTask)? in
+            guard let id = k.id else { return nil }
+            return (id, k)
+        })
+
+        struct RawInterval {
+            let taskId: Int64
+            let taskName: String
+            let startMs: Int64
+            let endMs: Int64
+            let status: WorklogStatus
+            let jiraKey: String?
+            let knownTaskId: Int64?
+            let description: String?
+        }
+
+        // Per-interval attribution across every day in the window, tagged with
+        // reconcile status and target. Breaks are never reportable (DESIGN.md
+        // §9.4 — deferred) and are excluded unconditionally, even under
+        // --include-unreconciled.
+        var intervals: [RawInterval] = []
+        try dbQueue.read { db in
+            var day = Calendar.current.startOfDay(for: from)
+            let dayEnd = Calendar.current.startOfDay(for: to)
+            while day <= dayEnd {
+                let slices = try sliceTimeline(day: day, db: db)
+                for slice in slices {
+                    guard let t = try Task.fetchOne(db, key: slice.taskId), t.category != "break" else { continue }
+                    let ktid = binds[slice.taskId]
+                    let known = ktid.flatMap { knownById[$0] }
+                    let status: WorklogStatus
+                    let jiraKey: String?
+                    if let k = known, let key = k.jiraKey {
+                        status = .reconciled
+                        jiraKey = key
+                    } else if known != nil {
+                        status = .provisional
+                        jiraKey = nil
+                    } else {
+                        status = .unbound
+                        jiraKey = nil
+                    }
+                    intervals.append(RawInterval(
+                        taskId: slice.taskId, taskName: t.name,
+                        startMs: slice.startMs, endMs: slice.endMs,
+                        status: status, jiraKey: jiraKey,
+                        knownTaskId: ktid, description: known?.description))
+                }
+                day = Calendar.current.date(byAdding: .day, value: 1, to: day)!
+            }
+        }
+
+        // --by interval: lossless, one record per raw slice. Normalisation is
+        // not applied at this grain (§5.1) — raw_seconds == seconds always.
+        if grain == .interval {
+            return intervals.map { iv in
+                let secs = Int((iv.endMs - iv.startMs) / 1_000)
+                let started = Date(timeIntervalSince1970: Double(iv.startMs) / 1_000)
+                let ended = Date(timeIntervalSince1970: Double(iv.endMs) / 1_000)
+                return WorklogRecord(
+                    date: Calendar.current.startOfDay(for: started),
+                    started: started, ended: ended,
+                    seconds: secs, rawSeconds: secs,
+                    jiraKey: iv.jiraKey, knownTaskId: iv.knownTaskId,
+                    description: iv.description, captureTasks: [iv.taskName],
+                    status: iv.status)
+            }.sorted { $0.started < $1.started }
+        }
+
+        // --by day / --by key: bucket intervals by target — jiraKey when
+        // reconciled, knownTaskId when provisional (each provisional Known Task
+        // is its own bucket even though jiraKey is null), or capture taskId
+        // when wholly unbound (each unbound capture task is its own bucket).
+        // Mirrors how unreconciled()/provisionalWithTime() already itemise the
+        // gate failure, so --include-unreconciled output stays legible.
+        enum TargetKey: Hashable {
+            case reconciled(String)
+            case provisional(Int64)
+            case unbound(Int64)
+        }
+        struct BucketKey: Hashable {
+            let day: Date?
+            let target: TargetKey
+        }
+        struct Bucket {
+            var rawSeconds = 0
+            var creditedSeconds = 0   // post pass-1 (drop/floor), pre pass-2 (round)
+            var startMs: Int64 = .max
+            var captureTasks: Set<String> = []
+            var jiraKey: String?
+            var knownTaskId: Int64?
+            var description: String?
+            var status: WorklogStatus = .unbound
+        }
+
+        var buckets: [BucketKey: Bucket] = [:]
+        for iv in intervals {
+            let target: TargetKey
+            switch iv.status {
+            case .reconciled:  target = .reconciled(iv.jiraKey!)
+            case .provisional: target = .provisional(iv.knownTaskId!)
+            case .unbound:     target = .unbound(iv.taskId)
+            }
+            let day: Date? = grain == .day
+                ? Calendar.current.startOfDay(for: Date(timeIntervalSince1970: Double(iv.startMs) / 1_000))
+                : nil
+            let key = BucketKey(day: day, target: target)
+
+            var b = buckets[key] ?? Bucket()
+            let rawSecs = Int((iv.endMs - iv.startMs) / 1_000)
+            b.rawSeconds += rawSecs
+            // Pass 1: per-interval drop/floor, matching reconciledReport exactly.
+            if !(dropBelowSec > 0 && rawSecs < dropBelowSec) {
+                b.creditedSeconds += max(rawSecs, minIntervalMin * 60)
+            }
+            b.startMs = min(b.startMs, iv.startMs)
+            b.captureTasks.insert(iv.taskName)
+            b.jiraKey = iv.jiraKey
+            b.knownTaskId = iv.knownTaskId
+            b.description = iv.description
+            b.status = iv.status
+            buckets[key] = b
+        }
+
+        // Pass 2: round each bucket's credited total up to the quantum. Below
+        // the quantum, a bucket is reported as-is — export never resolves
+        // sub-15 keys (§5.5); aggregateKey is intentionally unused here (see
+        // the doc comment on this method).
+        let quantum = roundToMin * 60
+        _ = aggregateKey
+
+        var records: [WorklogRecord] = []
+        records.reserveCapacity(buckets.count)
+        for (key, b) in buckets {
+            guard b.rawSeconds > 0 || b.creditedSeconds > 0 else { continue }
+            var seconds = b.creditedSeconds
+            if quantum > 0 && seconds >= quantum {
+                seconds = ((seconds + quantum - 1) / quantum) * quantum
+            }
+            records.append(WorklogRecord(
+                date: key.day,
+                started: Date(timeIntervalSince1970: Double(b.startMs) / 1_000),
+                ended: nil,
+                seconds: seconds,
+                rawSeconds: b.rawSeconds,
+                jiraKey: b.jiraKey,
+                knownTaskId: b.knownTaskId,
+                description: b.description,
+                captureTasks: b.captureTasks.sorted(),
+                status: b.status))
+        }
+
+        return records.sorted { lhs, rhs in
+            if let ld = lhs.date, let rd = rhs.date, ld != rd { return ld < rd }
+            return lhs.started < rhs.started
+        }
+    }
+
     // Returns JIRA keys whose post-pass-1 normalised total falls in (0, quantum)
     // after rolling up per task. Returns empty if roundToMin == 0 (no quantum).
     // Runs the same reconcile gate as reconciledReport — throws ReconcileError

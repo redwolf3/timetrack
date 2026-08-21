@@ -1,5 +1,10 @@
 import Foundation
 import TimeTrackKit
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 // MARK: - Error type
 
@@ -7,12 +12,21 @@ public enum CLIError: Error, CustomStringConvertible {
     case usage(String)
     case notFound(String)
     case message(String)
+    // The reconcile gate (CLAUDE.md invariant 4) is unmet for `export worklog`
+    // without --include-unreconciled. Carries the fully-formatted, multi-line
+    // diagnostic (offending tasks, how to fix) so main.swift can print it
+    // verbatim to stderr and exit 2 — a distinct code from every other CLI
+    // failure (docs/interchange-format.md §6.4), so a wrapper script can tell
+    // "you have unbound time" from "your invocation was wrong" without parsing
+    // stderr text.
+    case gateFailed(String)
 
     public var description: String {
         switch self {
-        case .usage(let s):    return "usage: \(s)"
-        case .notFound(let s): return "not found: \(s)"
-        case .message(let s):  return s
+        case .usage(let s):      return "usage: \(s)"
+        case .notFound(let s):   return "not found: \(s)"
+        case .message(let s):    return s
+        case .gateFailed(let s): return s
         }
     }
 }
@@ -26,23 +40,42 @@ public enum CLIError: Error, CustomStringConvertible {
 // terminated by a newline — exactly what print(_:) does).
 public protocol CLIOutput {
     func write(_ line: String)
+    /// Diagnostics — warnings, progress notes — that must never land on stdout
+    /// alongside payload data. docs/interchange-format.md §6.1: "All
+    /// diagnostics go to stderr; only payload goes to stdout." First needed by
+    /// `export worklog`, whose stdout is a machine-readable file a user pipes
+    /// elsewhere.
+    func writeError(_ line: String)
 }
 
-/// Default sink used by the executable: behaves exactly like `print`.
+/// Default sink used by the executable: behaves exactly like `print`, but
+/// `writeError` goes to standard error instead of standard output.
 public struct StandardOutput: CLIOutput {
     public init() {}
     public func write(_ line: String) { print(line) }
+    public func writeError(_ line: String) {
+        FileHandle.standardError.write(Data((line + "\n").utf8))
+    }
 }
 
-/// Collects emitted lines for inspection in tests.
+/// Collects emitted lines for inspection in tests. Keeps stdout and stderr
+/// lines in separate arrays (mirroring two distinct file descriptors) so a
+/// test can assert, e.g., that a payload command wrote nothing but the payload
+/// to stdout while a warning landed on stderr.
 public final class CapturingOutput: CLIOutput {
     public private(set) var lines: [String] = []
+    public private(set) var errorLines: [String] = []
     public init() {}
     public func write(_ line: String) { lines.append(line) }
+    public func writeError(_ line: String) { errorLines.append(line) }
     /// Joined with newlines and a trailing newline, matching what a sequence of
     /// `print` calls would have produced on stdout.
     public var text: String {
         lines.isEmpty ? "" : lines.joined(separator: "\n") + "\n"
+    }
+    /// Same shape as `text`, for the stderr sink.
+    public var errorText: String {
+        errorLines.isEmpty ? "" : errorLines.joined(separator: "\n") + "\n"
     }
 }
 
@@ -120,6 +153,7 @@ public enum CLI {
         case "known":      try cmdKnown(rest, store: store, out: out)
         case "reconcile":  try cmdReconcile(rest, store: store, out: out)
         case "bind":       try cmdBind(rest, store: store, out: out)
+        case "export":     try cmdExport(rest, store: store, out: out)
         case "help", "--help", "-h":
             printHelp(out)
         default:
@@ -493,6 +527,222 @@ private func cmdBind(_ args: [String], store: Store, out: CLIOutput) throws {
     }
 }
 
+// MARK: - export
+//
+// docs/interchange-format.md §6: `export <type>` writes a machine-readable
+// payload (JSON or CSV) to stdout, or atomically to --out FILE. Only `worklog`
+// (issue #59 Phase B) is implemented here; `known`/`events` are other phases,
+// but the two-level dispatch is shaped so they slot in beside `worklog`
+// without restructuring this switch.
+//
+// Deliberately NOT added to the known_tasks.yaml startup-ingest gate above:
+// export is read-only and must stay off the store's write path (two-process
+// WAL caveat, CLAUDE.md).
+
+private func cmdExport(_ args: [String], store: Store, out: CLIOutput) throws {
+    guard let sub = args.first else {
+        throw CLIError.usage("timetrack export <known|worklog|events>")
+    }
+    let rest = Array(args.dropFirst())
+    switch sub {
+    case "worklog":
+        try cmdExportWorklog(rest, store: store, out: out)
+    case "known", "events":
+        throw CLIError.usage(
+            "timetrack export \(sub) is not implemented yet (see docs/interchange-format.md); " +
+            "only 'worklog' is available in this build")
+    default:
+        throw CLIError.usage("unknown export subcommand '\(sub)'")
+    }
+}
+
+private func cmdExportWorklog(_ args: [String], store: Store, out: CLIOutput) throws {
+    var from: Date? = nil
+    var to: Date? = nil
+    var format: WorklogCodec.Format = .json
+    var outPath: String? = nil
+    var grain: Store.WorklogGrain = .day
+    var includeUnreconciled = false
+    var dropBelowSec = 0
+    var minIntervalMin = 0
+    var roundToMin = 0
+    var aggregateKey: String? = nil
+
+    func usage() -> CLIError {
+        CLIError.usage(
+            "timetrack export worklog --from YYYY-MM-DD --to YYYY-MM-DD\n" +
+            "                         [--format json|csv] [--out FILE]\n" +
+            "                         [--by day|key|interval]\n" +
+            "                         [--include-unreconciled]\n" +
+            "                         [--drop-below-sec N] [--min-interval-min N]\n" +
+            "                         [--round-to-min N] [--aggregate-key KEY]")
+    }
+
+    var i = 0
+    while i < args.count {
+        switch args[i] {
+        case "--from":
+            i += 1
+            guard i < args.count, let d = parseDate(args[i]) else { throw usage() }
+            from = d
+        case "--to":
+            i += 1
+            guard i < args.count, let d = parseDate(args[i]) else { throw usage() }
+            to = d
+        case "--format":
+            i += 1
+            guard i < args.count else { throw usage() }
+            switch args[i] {
+            case "json": format = .json
+            case "csv":  format = .csv
+            default: throw CLIError.usage("--format must be 'json' or 'csv', got '\(args[i])'")
+            }
+        case "--out":
+            i += 1
+            guard i < args.count else { throw usage() }
+            outPath = args[i]
+        case "--by":
+            i += 1
+            guard i < args.count else { throw usage() }
+            switch args[i] {
+            case "day":      grain = .day
+            case "key":      grain = .key
+            case "interval": grain = .interval
+            default: throw CLIError.usage("--by must be 'day', 'key', or 'interval', got '\(args[i])'")
+            }
+        case "--include-unreconciled":
+            includeUnreconciled = true
+        case "--drop-below-sec":
+            i += 1
+            guard i < args.count, let n = Int(args[i]) else { throw usage() }
+            dropBelowSec = n
+        case "--min-interval-min":
+            i += 1
+            guard i < args.count, let n = Int(args[i]) else { throw usage() }
+            minIntervalMin = n
+        case "--round-to-min":
+            i += 1
+            guard i < args.count, let n = Int(args[i]) else { throw usage() }
+            roundToMin = n
+        case "--aggregate-key":
+            i += 1
+            guard i < args.count else { throw usage() }
+            aggregateKey = args[i]
+        default:
+            throw usage()
+        }
+        i += 1
+    }
+
+    guard let fromDate = from, let toDate = to else { throw usage() }
+    guard toDate >= fromDate else {
+        throw CLIError.usage("--to is before --from")
+    }
+
+    let records: [Store.WorklogRecord]
+    do {
+        records = try store.worklog(
+            from: fromDate, to: toDate, grain: grain,
+            includeUnreconciled: includeUnreconciled,
+            dropBelowSec: dropBelowSec, minIntervalMin: minIntervalMin,
+            roundToMin: roundToMin, aggregateKey: aggregateKey)
+    } catch Store.ReconcileError.unbound(let tasks) {
+        throw CLIError.gateFailed(gateFailureMessage(unbound: tasks))
+    } catch Store.ReconcileError.provisional(let known) {
+        throw CLIError.gateFailed(gateFailureMessage(provisional: known))
+    }
+
+    // --include-unreconciled downgrades the gate to a warning (§5.3): the same
+    // diagnostics that would have blocked the export instead go to stderr,
+    // exit code stays 0, and the caller filters on status == "reconciled".
+    if includeUnreconciled {
+        let unbound = try store.unreconciled(from: fromDate, to: toDate)
+        if !unbound.isEmpty {
+            out.writeError("warning: " + gateFailureMessage(unbound: unbound))
+        }
+        let provisional = try store.provisionalWithTime(from: fromDate, to: toDate)
+        if !provisional.isEmpty {
+            out.writeError("warning: " + gateFailureMessage(provisional: provisional))
+        }
+    }
+
+    let normalisation = WorklogCodec.Normalisation(
+        dropBelowSec: dropBelowSec, minIntervalMin: minIntervalMin,
+        roundToMin: roundToMin, aggregateKey: aggregateKey)
+    let payload = WorklogCodec.encode(
+        records: records, format: format, generated: Date(),
+        from: fromDate, to: toDate, normalisation: normalisation)
+
+    if let outPath = outPath {
+        try writeFileAtomically(payload + "\n", to: URL(fileURLWithPath: outPath))
+    } else {
+        // Payload only on stdout (§6.1); warnings above already went to stderr.
+        out.write(payload)
+    }
+}
+
+// Shared with cmdReconcile's own gate-failure formatting so the two surfaces
+// read consistently; kept separate rather than refactored into one shared
+// function because cmdReconcile writes to `out` (stdout, human-readable
+// command) while export worklog's gate failure is either a hard error to
+// stderr (exit 2) or, under --include-unreconciled, a warning to stderr —
+// never stdout, which export reserves for payload (§6.1).
+private func gateFailureMessage(unbound tasks: [Store.UnreconciledTask]) -> String {
+    var lines = ["Unreconciled tasks:"]
+    for t in tasks {
+        lines.append("  \(t.task.name.padRight(30)) \(formatDuration(t.totalSeconds))  [no binding]")
+    }
+    lines.append("")
+    lines.append("Bind each task to a known task, then re-run:")
+    lines.append("  timetrack bind <capture-task-name-or-id> <known-task-id>")
+    return lines.joined(separator: "\n")
+}
+
+private func gateFailureMessage(provisional known: [KnownTask]) -> String {
+    var lines = ["Provisional known tasks with time must be promoted first:"]
+    for k in known {
+        let idStr = k.id.map(String.init) ?? "?"
+        lines.append("  #\(idStr)  \(k.description)")
+    }
+    lines.append("")
+    lines.append("Promote with: timetrack known promote <id> <jira-key>")
+    return lines.joined(separator: "\n")
+}
+
+// MARK: - Atomic file writes
+//
+// No precedent for this in the repo before --out FILE (docs/interchange-format
+// §6.1: "the file is written atomically (temp + rename) and never partially
+// written on a gate failure"). Writes to a temp file in the SAME directory as
+// the destination (so the rename is same-filesystem, a requirement for POSIX
+// rename() to be atomic) and renames over the destination with a single
+// rename(2) syscall — not remove-then-move, which would leave a real window
+// where the destination doesn't exist. rename(2) is POSIX and behaves
+// identically on Darwin and Linux, so this needs no platform branch beyond the
+// import at the top of this file.
+private func writeFileAtomically(_ content: String, to url: URL) throws {
+    guard let data = content.data(using: .utf8) else {
+        throw CLIError.message("failed to encode output as UTF-8")
+    }
+    let dir = url.deletingLastPathComponent()
+    let tempURL = dir.appendingPathComponent(".\(url.lastPathComponent).tmp-\(UUID().uuidString)")
+    do {
+        try data.write(to: tempURL, options: .atomic)
+    } catch {
+        throw CLIError.message("failed to write temp file for '\(url.path)': \(error)")
+    }
+    let rc = tempURL.path.withCString { tmpC in
+        url.path.withCString { dstC in
+            rename(tmpC, dstC)
+        }
+    }
+    guard rc == 0 else {
+        let err = errno
+        try? FileManager.default.removeItem(at: tempURL)
+        throw CLIError.message("failed to write '\(url.path)': rename failed (errno \(err))")
+    }
+}
+
 // MARK: - Helpers
 
 // Resolve an existing capture task by numeric id or (case-insensitive) name.
@@ -633,6 +883,27 @@ private func printHelp(_ out: CLIOutput) {
                                              overhead, bind to the overhead
                                              JIRA's known-task id (no special
                                              flag).
+      export worklog --from YYYY-MM-DD --to YYYY-MM-DD
+                     [--format json|csv] [--out FILE]
+                     [--by day|key|interval] [--include-unreconciled]
+                     [--drop-below-sec N] [--min-interval-min N]
+                     [--round-to-min N] [--aggregate-key KEY]
+                                             Export reconciled time as JSON or
+                                             CSV (default: stdout, JSON, --by
+                                             day; --drop-below-sec,
+                                             --min-interval-min, and
+                                             --round-to-min all default to 0 —
+                                             no normalisation — and
+                                             --aggregate-key defaults to unset).
+                                             Refuses to write unbound or
+                                             provisional time unless
+                                             --include-unreconciled is given
+                                             (exit 2). See
+                                             docs/interchange-format.md.
+
+    Note: human-readable output above (report, status, known list, reconcile,
+    …) is not a contract and may change at any time — only `export`/`import`
+    payloads and CLI exit codes are (docs/interchange-format.md §2).
     """)
 }
 
