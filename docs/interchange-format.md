@@ -391,6 +391,34 @@ Requirements:
   Resolving that divergence may land as its own change; until it does, export
   **must** state its defaults in `--help` and in the envelope.
 
+#### 5.4.1 Implementation note: grouping unit (Phase B)
+
+`reconciledReport` rolls pass-1 (drop/floor) totals up to **one bucket per JIRA
+key across the whole window** before pass-2 (round-up) runs. `export worklog`
+needs a bucket **per output record** instead — per `(day, key)` for `--by day`,
+per `key` for `--by key` — because a day-grain worklog row has to be a valid
+standalone JIRA worklog entry, not a fragment of a window-wide total.
+
+Consequence, stated so it isn't mistaken for a bug: **summing a `--by day`
+export's `seconds` across the window is not guaranteed to equal
+`timetrack reconcile`'s total for the same window and parameters.** Rounding up
+per day can round up more than once where the window-level rollup would have
+rounded once. This is inherent to choosing a smaller grain, not a normalisation
+disagreement — the *parameters* (§5.4's four knobs) are identical between the
+two paths; only the *unit* they're applied to differs by design.
+
+`--aggregate-key` mirrors `reconciledReport`'s pass-3 special case: a
+`reconciled`-status group whose key matches `--aggregate-key` is force-rounded
+up to at least one quantum whenever it has any credited time — including
+sub-quantum, unlike every other group. This matches `reconciledReport`, where
+the aggregate bucket is never a sub-15 prompt candidate. With
+`subFifteenResolutions` unpopulated (§5.5), the flag has no *other* effect in
+v1 beyond that same force-rounding; it does no rolling-in.
+
+`started` is the start of the group's **first physical interval**, including
+one that pass-1 later drops below `--drop-below-sec` — not the first surviving
+one. A dropped opening blip still marks when work on that key began.
+
 ### 5.5 Sub-15 resolutions are out of scope in v1
 
 `reconciledReport`'s fifth parameter, `subFifteenResolutions`, is a per-key map of

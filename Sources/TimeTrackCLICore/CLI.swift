@@ -12,12 +12,20 @@ public enum CLIError: Error, CustomStringConvertible {
     case usage(String)
     case notFound(String)
     case message(String)
+    // docs/interchange-format.md §6.4: exit code 2, distinct from the generic
+    // usage-error 1, so a wrapper script can tell "you have unbound time" from
+    // "your invocation was wrong" without parsing stderr. The detailed listing
+    // of offending tasks is written separately via out.writeError before this
+    // is thrown (see cmdExportWorklog) — this case carries only the summary
+    // line main.swift prints after it.
+    case reconcileGate(String)
 
     public var description: String {
         switch self {
-        case .usage(let s):    return "usage: \(s)"
-        case .notFound(let s): return "not found: \(s)"
-        case .message(let s):  return s
+        case .usage(let s):        return "usage: \(s)"
+        case .notFound(let s):     return "not found: \(s)"
+        case .message(let s):      return s
+        case .reconcileGate(let s): return s
         }
     }
 }
@@ -524,10 +532,10 @@ private func cmdBind(_ args: [String], store: Store, out: CLIOutput) throws {
 // MARK: - export
 //
 // docs/interchange-format.md §6: `export <type>` writes a machine-readable
-// payload (JSON or CSV) to stdout, or atomically to --out FILE. Only `known`
-// (issue #59 Phase A) is implemented; `worklog`/`events` are later phases, but
-// the two-level dispatch (mirroring cmdKnown's sub-switch) is shaped so they
-// slot in beside `known` without restructuring this switch.
+// payload (JSON or CSV) to stdout, or atomically to --out FILE. `known`
+// (issue #59 Phase A) and `worklog` (Phase B) are implemented; `events` is a
+// later phase, but the two-level dispatch (mirroring cmdKnown's sub-switch)
+// is shaped so it slots in beside these without restructuring this switch.
 //
 // Deliberately NOT added to the known_tasks.yaml startup-ingest gate above:
 // export is read-only and must stay off the store's write path (two-process
@@ -542,10 +550,12 @@ private func cmdExport(_ args: [String], store: Store, out: CLIOutput) throws {
     switch sub {
     case "known":
         try cmdExportKnown(rest, store: store, out: out)
-    case "worklog", "events":
+    case "worklog":
+        try cmdExportWorklog(rest, store: store, out: out)
+    case "events":
         throw CLIError.usage(
-            "timetrack export \(sub) is not implemented yet (see docs/interchange-format.md); " +
-            "only 'known' is available in this build")
+            "timetrack export events is not implemented yet (see docs/interchange-format.md); " +
+            "only 'known' and 'worklog' are available in this build")
     default:
         throw CLIError.usage("unknown export subcommand '\(sub)'")
     }
@@ -593,6 +603,138 @@ private func cmdExportKnown(_ args: [String], store: Store, out: CLIOutput) thro
     } else {
         // Payload only on stdout (§6.1) — export known never has diagnostics to
         // emit, but if it ever does, they belong on out.writeError, not here.
+        out.write(payload)
+    }
+}
+
+// MARK: - export worklog
+//
+// docs/interchange-format.md §5/§6: reconciled, machine-readable time out —
+// the primary export. Business logic (grouping, normalisation, the reconcile
+// gate) lives in Store.worklog (invariant 3); this function only parses args,
+// renders the two distinct gate-failure messages, and writes the payload.
+
+private func cmdExportWorklog(_ args: [String], store: Store, out: CLIOutput) throws {
+    var from: Date? = nil
+    var to: Date? = nil
+    var format: WorklogCodec.Format = .json
+    var outPath: String? = nil
+    var grain: Store.WorklogGrain = .day
+    var includeUnreconciled = false
+    var dropBelowSec = 0
+    var minIntervalMin = 0
+    var roundToMin = 0
+    var aggregateKey: String? = nil
+
+    let usage = "timetrack export worklog --from YYYY-MM-DD --to YYYY-MM-DD " +
+        "[--format json|csv] [--out FILE] [--by day|key|interval] [--include-unreconciled] " +
+        "[--drop-below-sec N] [--min-interval-min N] [--round-to-min N] [--aggregate-key KEY]"
+
+    var i = 0
+    while i < args.count {
+        switch args[i] {
+        case "--from":
+            i += 1
+            guard i < args.count, let d = parseDate(args[i]) else { throw CLIError.usage(usage) }
+            from = d
+        case "--to":
+            i += 1
+            guard i < args.count, let d = parseDate(args[i]) else { throw CLIError.usage(usage) }
+            to = d
+        case "--format":
+            i += 1
+            guard i < args.count else { throw CLIError.usage(usage) }
+            switch args[i] {
+            case "json": format = .json
+            case "csv":  format = .csv
+            default: throw CLIError.usage("--format must be 'json' or 'csv', got '\(args[i])'")
+            }
+        case "--out":
+            i += 1
+            guard i < args.count else { throw CLIError.usage(usage) }
+            outPath = args[i]
+        case "--by":
+            i += 1
+            guard i < args.count, let g = Store.WorklogGrain(rawValue: args[i]) else {
+                throw CLIError.usage("--by must be 'day', 'key', or 'interval'")
+            }
+            grain = g
+        case "--include-unreconciled":
+            includeUnreconciled = true
+        case "--drop-below-sec":
+            i += 1
+            guard i < args.count, let n = Int(args[i]) else { throw CLIError.usage(usage) }
+            dropBelowSec = n
+        case "--min-interval-min":
+            i += 1
+            guard i < args.count, let n = Int(args[i]) else { throw CLIError.usage(usage) }
+            minIntervalMin = n
+        case "--round-to-min":
+            i += 1
+            guard i < args.count, let n = Int(args[i]) else { throw CLIError.usage(usage) }
+            roundToMin = n
+        case "--aggregate-key":
+            i += 1
+            guard i < args.count else { throw CLIError.usage(usage) }
+            aggregateKey = args[i]
+        default:
+            throw CLIError.usage(usage)
+        }
+        i += 1
+    }
+
+    guard let from = from, let to = to else { throw CLIError.usage(usage) }
+    guard to >= from else {
+        throw CLIError.usage("--to (\(formatDate(to))) is before --from (\(formatDate(from)))")
+    }
+
+    let records: [Store.WorklogRecord]
+    do {
+        records = try store.worklog(
+            from: from, to: to, by: grain, includeUnreconciled: includeUnreconciled,
+            dropBelowSec: dropBelowSec, minIntervalMin: minIntervalMin,
+            roundToMin: roundToMin, aggregateKey: aggregateKey)
+    } catch Store.ReconcileError.unbound(let tasks) {
+        // Same two distinct failure modes as `reconcile` (§5.3), but on stderr —
+        // this command's stdout is a machine-readable payload, never prose.
+        out.writeError("Unreconciled tasks (\(formatDate(from))–\(formatDate(to))):")
+        for t in tasks {
+            out.writeError("  \(t.task.name.padRight(30)) \(formatDuration(t.totalSeconds))  [no binding]")
+        }
+        out.writeError("Bind each task to a known task, or pass --include-unreconciled.")
+        throw CLIError.reconcileGate("reconcile gate not satisfied: unbound capture tasks in window")
+    } catch Store.ReconcileError.provisional(let known) {
+        out.writeError("Provisional known tasks with time must be promoted first:")
+        for k in known {
+            out.writeError("  #\(k.id.map(String.init) ?? "?")  \(k.description)")
+        }
+        out.writeError("Promote with 'timetrack known promote', or pass --include-unreconciled.")
+        throw CLIError.reconcileGate("reconcile gate not satisfied: provisional known tasks with time")
+    }
+
+    // Gate downgraded to a warning (§5.3): surface what's still unreconciled,
+    // but proceed — exit 0, payload includes the unbound/provisional records.
+    if includeUnreconciled {
+        let unresolved = records.filter { $0.status != .reconciled }
+        if !unresolved.isEmpty {
+            out.writeError("warning: \(unresolved.count) unreconciled record(s) in window (\(formatDate(from))–\(formatDate(to))):")
+            for r in unresolved {
+                let label = r.status == .unbound ? "no binding" : "provisional"
+                out.writeError("  \(r.captureTasks.joined(separator: ", "))  [\(label)]")
+            }
+        }
+    }
+
+    let normalisation = WorklogCodec.Normalisation(
+        dropBelowSec: dropBelowSec, minIntervalMin: minIntervalMin,
+        roundToMin: roundToMin, aggregateKey: aggregateKey)
+    let payload = WorklogCodec.encode(
+        records: records, format: format, generated: Date(),
+        window: (from: from, to: to), normalisation: normalisation)
+
+    if let outPath = outPath {
+        try writeFileAtomically(payload + "\n", to: URL(fileURLWithPath: outPath))
+    } else {
         out.write(payload)
     }
 }
@@ -953,6 +1095,20 @@ private func printHelp(_ out: CLIOutput) {
                                              Export the known-tasks registry as
                                              JSON or CSV (default: stdout, JSON).
                                              See docs/interchange-format.md.
+      export worklog --from YYYY-MM-DD --to YYYY-MM-DD
+                     [--format json|csv] [--out FILE] [--by day|key|interval]
+                     [--include-unreconciled] [--drop-below-sec N]
+                     [--min-interval-min N] [--round-to-min N]
+                     [--aggregate-key KEY]
+                                             Export reconciled time as JIRA-
+                                             ready worklog records (default
+                                             grain: day; normalisation knobs
+                                             default to 0/none — no drop, no
+                                             floor, no rounding). Exits 2 if
+                                             any time in the window is unbound
+                                             or provisional, unless
+                                             --include-unreconciled is given.
+                                             See docs/interchange-format.md §5.
       import known FILE [--format auto|json|csv] [--dry-run]
                                              Import known-task records (JSON or
                                              CSV) into the registry. --dry-run

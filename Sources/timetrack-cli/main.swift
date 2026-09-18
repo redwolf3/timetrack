@@ -7,7 +7,8 @@ import TimeTrackCLICore
 //
 // This shell's only jobs are: (1) hop onto the main actor, (2) forward argv
 // (minus the executable name) to CLI.run, and (3) translate the outcome into the
-// process exit code — exit(0) on success, exit(1) on any thrown error. The core
+// process exit code — exit(0) on success, exit(1) on a usage/lookup error,
+// exit(2) on CLIError.reconcileGate (docs/interchange-format.md §6.4). The core
 // never calls exit() itself; that contract lives here.
 //
 // Dispatch onto the main actor and keep the RunLoop alive until exit() is called.
@@ -18,6 +19,7 @@ _Concurrency.Task { @MainActor in
         try CLI.run(args: Array(CommandLine.arguments.dropFirst()))
     } catch let e as CLIError {
         fputs("error: \(e.description)\n", stderr)
+        if case .reconcileGate = e { exit(2) }
         exit(1)
     } catch {
         fputs("error: \(error)\n", stderr)

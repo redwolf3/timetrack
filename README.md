@@ -66,17 +66,34 @@ known_tasks:
 ## Import / export
 
 ```
-timetrack export known [--format json|csv] [--out FILE] [--include-retired]
-timetrack import known FILE [--format auto|json|csv] [--dry-run]
+timetrack export known   [--format json|csv] [--out FILE] [--include-retired]
+timetrack export worklog --from YYYY-MM-DD --to YYYY-MM-DD
+                         [--format json|csv] [--out FILE] [--by day|key|interval]
+                         [--include-unreconciled] [--drop-below-sec N]
+                         [--min-interval-min N] [--round-to-min N]
+                         [--aggregate-key KEY]
+timetrack import known   FILE [--format auto|json|csv] [--dry-run]
 ```
 
-The stable, versioned, scriptable surface for getting the Known Tasks registry
-into and out of TimeTrack — JIRA worklog uploaders, spreadsheet pipelines, bulk
-registry setup from a JIRA search, without reading `events.db` directly.
+The stable, versioned, scriptable surface for getting TimeTrack's data into and
+out of the tool — JIRA worklog uploaders, spreadsheet pipelines, bulk registry
+setup from a JIRA search — without reading `events.db` directly.
 
 - `export known` writes the active (non-retired) registry as JSON (default) or
   CSV to stdout, or atomically to `--out FILE`; `--include-retired` adds
   retired entries. Diagnostics, if any, go to stderr — stdout is payload only.
+- `export worklog` writes reconciled time as JIRA-ready worklog records, one
+  per `(day, jira key)` by default (`--by key` rolls each key up across the
+  whole window instead; `--by interval` emits one lossless record per raw
+  tracked interval with no normalisation applied). By default, any unbound or
+  still-provisional time in the window blocks the export entirely — nothing is
+  written, the offending tasks print to stderr, and the process exits **2**;
+  pass `--include-unreconciled` to downgrade that to a warning and emit those
+  records anyway with `jira_key: null`. `--drop-below-sec`, `--min-interval-min`,
+  `--round-to-min`, and `--aggregate-key` mirror the same normalisation knobs
+  the app's reconcile panel uses, applied per output record rather than once
+  across the window — see `docs/interchange-format.md` §5.4.1 for exactly what
+  that means for summed totals.
 - `import known FILE` reads JSON or CSV (`--format auto`, the default, sniffs
   the extension then the first non-whitespace byte) and upserts it into the
   registry through the same rules `known_tasks.yaml` uses: match-by-key,
@@ -85,11 +102,12 @@ registry setup from a JIRA search, without reading `events.db` directly.
   — inserts, promotions, description updates, no-ops — without applying it;
   omitting the flag applies the changes.
 - Exit codes: 0 success, 1 usage error / unreadable or missing file / malformed
-  input / unknown format or version.
+  input / unknown format or version, 2 reconcile gate not satisfied
+  (`export worklog` without `--include-unreconciled`).
 
 Full field-level contract, CSV quoting rules, and the round-trip guarantee:
-**`docs/interchange-format.md`**. `export worklog`, `export events`, and
-`import worklog` are specified there but not yet implemented.
+**`docs/interchange-format.md`**. `export events` and `import worklog` are
+specified there but not yet implemented.
 
 **Human-readable CLI output is not a contract.** `report`, `status`,
 `known list`, `reconcile`, and every command run without `--format` are
