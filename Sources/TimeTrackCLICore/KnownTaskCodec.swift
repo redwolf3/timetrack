@@ -224,8 +224,8 @@ public enum KnownTaskCodec {
 
         var entries: [KnownTasksLoader.KnownTaskEntry] = []
         for (rowIndex, row) in rows.dropFirst().enumerated() {
-            guard row.count >= csvHeader.count else {
-                throw CodecError.malformedCSV("row \(rowIndex + 2) has \(row.count) column(s), expected at least \(csvHeader.count)")
+            guard row.count == header.count else {
+                throw CodecError.malformedCSV("row \(rowIndex + 2) has \(row.count) column(s), expected \(header.count)")
             }
             let description = row[2].trimmingCharacters(in: .whitespacesAndNewlines)
             guard !description.isEmpty else {
