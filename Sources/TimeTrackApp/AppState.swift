@@ -605,7 +605,7 @@ final class AppState: ObservableObject {
             // the separate Keep choice.
             let targets = selectable
                 .filter { $0.id != seg.originalTaskId }
-                .compactMap { t in t.id.map { IdleMoveTarget(id: $0, name: t.name) } }
+                .compactMap { t in t.id.map { IdleMoveTarget(id: $0, name: Self.titleLabel(for: t.title)) } }
             return IdleSegmentItem(
                 id: seg.id,
                 timeRangeLabel: range,
@@ -633,10 +633,17 @@ final class AppState: ObservableObject {
     // description". One line, key first: the view tail-truncates it, so the
     // key (the part that identifies the task) is the part that always survives.
     private static func keepLabel(for title: TaskTitle) -> String {
+        "Keep on \(titleLabel(for: title))"
+    }
+
+    // One-line "KEY · description" for menus and buttons, where a two-line
+    // layout isn't available. Key first so it survives tail truncation and
+    // tasks with similar descriptions stay distinguishable.
+    private static func titleLabel(for title: TaskTitle) -> String {
         if let key = title.key {
-            return "Keep on \(key) · \(title.description)"
+            return "\(key) · \(title.description)"
         }
-        return "Keep on \(title.description)"
+        return title.description
     }
 
     // Exhaustive switch (no default) so a new IdleSegment.Kind is a compile error

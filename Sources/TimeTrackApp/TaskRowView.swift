@@ -119,11 +119,13 @@ struct TaskRowView: View {
 
             Spacer()
 
-            if let annotation = todayAnnotation {
-                Text(annotation)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+            // Always present (a blank placeholder when there's no time today):
+            // .caption and .caption.monospaced() have different line metrics,
+            // so a conditionally-present annotation would make rows with and
+            // without time today differ in height — see the file invariant.
+            Text(todayAnnotation ?? " ")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 
