@@ -253,7 +253,7 @@ public enum KnownTaskCodec {
         var fieldWasQuoted = false
         var sawAnyContentInRow = false
 
-        let chars = Array(text)
+        let chars = text.unicodeScalars.map { Character(String($0)) }
         var i = 0
         let n = chars.count
 
