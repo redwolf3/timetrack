@@ -1,5 +1,10 @@
 import Foundation
 import TimeTrackKit
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 // MARK: - Error type
 
@@ -26,23 +31,44 @@ public enum CLIError: Error, CustomStringConvertible {
 // terminated by a newline — exactly what print(_:) does).
 public protocol CLIOutput {
     func write(_ line: String)
+    /// Diagnostics — warnings, progress notes — that must never land on stdout
+    /// alongside payload data. docs/interchange-format.md §6.1: "All
+    /// diagnostics go to stderr; only payload goes to stdout." First needed by
+    /// `export known`/`import known`, whose stdout is a machine-readable file a
+    /// user pipes elsewhere. Added here rather than as a free function so tests
+    /// can assert the stdout/stderr split via a single injected sink, the same
+    /// way `write` is already tested via `CapturingOutput`.
+    func writeError(_ line: String)
 }
 
-/// Default sink used by the executable: behaves exactly like `print`.
+/// Default sink used by the executable: behaves exactly like `print`, but
+/// `writeError` goes to standard error instead of standard output.
 public struct StandardOutput: CLIOutput {
     public init() {}
     public func write(_ line: String) { print(line) }
+    public func writeError(_ line: String) {
+        FileHandle.standardError.write(Data((line + "\n").utf8))
+    }
 }
 
-/// Collects emitted lines for inspection in tests.
+/// Collects emitted lines for inspection in tests. Keeps stdout and stderr
+/// lines in separate arrays (mirroring two distinct file descriptors) so a
+/// test can assert, e.g., that a payload command wrote nothing but the payload
+/// to stdout while a warning landed on stderr.
 public final class CapturingOutput: CLIOutput {
     public private(set) var lines: [String] = []
+    public private(set) var errorLines: [String] = []
     public init() {}
     public func write(_ line: String) { lines.append(line) }
+    public func writeError(_ line: String) { errorLines.append(line) }
     /// Joined with newlines and a trailing newline, matching what a sequence of
     /// `print` calls would have produced on stdout.
     public var text: String {
         lines.isEmpty ? "" : lines.joined(separator: "\n") + "\n"
+    }
+    /// Same shape as `text`, for the stderr sink.
+    public var errorText: String {
+        errorLines.isEmpty ? "" : errorLines.joined(separator: "\n") + "\n"
     }
 }
 
@@ -120,6 +146,8 @@ public enum CLI {
         case "known":      try cmdKnown(rest, store: store, out: out)
         case "reconcile":  try cmdReconcile(rest, store: store, out: out)
         case "bind":       try cmdBind(rest, store: store, out: out)
+        case "export":     try cmdExport(rest, store: store, out: out)
+        case "import":     try cmdImport(rest, store: store, out: out)
         case "help", "--help", "-h":
             printHelp(out)
         default:
@@ -493,6 +521,294 @@ private func cmdBind(_ args: [String], store: Store, out: CLIOutput) throws {
     }
 }
 
+// MARK: - export
+//
+// docs/interchange-format.md §6: `export <type>` writes a machine-readable
+// payload (JSON or CSV) to stdout, or atomically to --out FILE. Only `known`
+// (issue #59 Phase A) is implemented; `worklog`/`events` are later phases, but
+// the two-level dispatch (mirroring cmdKnown's sub-switch) is shaped so they
+// slot in beside `known` without restructuring this switch.
+//
+// Deliberately NOT added to the known_tasks.yaml startup-ingest gate above:
+// export is read-only and must stay off the store's write path (two-process
+// WAL caveat, CLAUDE.md), and mixing two registry sources (yaml + the file
+// being exported) in one invocation would be confusing anyway.
+
+private func cmdExport(_ args: [String], store: Store, out: CLIOutput) throws {
+    guard let sub = args.first else {
+        throw CLIError.usage("timetrack export <known|worklog|events>")
+    }
+    let rest = Array(args.dropFirst())
+    switch sub {
+    case "known":
+        try cmdExportKnown(rest, store: store, out: out)
+    case "worklog", "events":
+        throw CLIError.usage(
+            "timetrack export \(sub) is not implemented yet (see docs/interchange-format.md); " +
+            "only 'known' is available in this build")
+    default:
+        throw CLIError.usage("unknown export subcommand '\(sub)'")
+    }
+}
+
+private func cmdExportKnown(_ args: [String], store: Store, out: CLIOutput) throws {
+    var format: KnownTaskCodec.Format = .json
+    var outPath: String? = nil
+    var includeRetired = false
+
+    var i = 0
+    while i < args.count {
+        switch args[i] {
+        case "--format":
+            i += 1
+            guard i < args.count else { throw CLIError.usage("--format requires 'json' or 'csv'") }
+            switch args[i] {
+            case "json": format = .json
+            case "csv":  format = .csv
+            default: throw CLIError.usage("--format must be 'json' or 'csv', got '\(args[i])'")
+            }
+        case "--out":
+            i += 1
+            guard i < args.count else { throw CLIError.usage("--out requires a file path") }
+            outPath = args[i]
+        case "--include-retired":
+            includeRetired = true
+        default:
+            throw CLIError.usage("timetrack export known [--format json|csv] [--out FILE] [--include-retired]")
+        }
+        i += 1
+    }
+
+    // activeOnly excludes retired by default (§4.1: "excluded from export unless
+    // --include-retired"); Store.knownTasks's own default matches, so this stays
+    // an explicit mirror of the flag rather than relying on the parameter default.
+    let tasks = try store.knownTasks(activeOnly: !includeRetired)
+    // No trailing newline from the codec (see KnownTaskCodec.encode) — added
+    // exactly once here, whichever sink receives it, so stdout and --out FILE
+    // produce byte-identical bytes.
+    let payload = KnownTaskCodec.encode(tasks: tasks, format: format, generated: Date())
+
+    if let outPath = outPath {
+        try writeFileAtomically(payload + "\n", to: URL(fileURLWithPath: outPath))
+    } else {
+        // Payload only on stdout (§6.1) — export known never has diagnostics to
+        // emit, but if it ever does, they belong on out.writeError, not here.
+        out.write(payload)
+    }
+}
+
+// MARK: - import
+//
+// docs/interchange-format.md §6/§7.1: `import <type> FILE` decodes a
+// previously-exported (or hand-written) payload and applies it. Only `known`
+// is implemented (issue #59 Phase A); `worklog` needs the new manual_entry
+// event type (§7.2) and is a later phase.
+
+private func cmdImport(_ args: [String], store: Store, out: CLIOutput) throws {
+    guard let sub = args.first else {
+        throw CLIError.usage("timetrack import <known|worklog>")
+    }
+    let rest = Array(args.dropFirst())
+    switch sub {
+    case "known":
+        try cmdImportKnown(rest, store: store, out: out)
+    case "worklog":
+        throw CLIError.usage(
+            "timetrack import worklog is not implemented yet (see docs/interchange-format.md §7.2); " +
+            "only 'known' is available in this build")
+    default:
+        throw CLIError.usage("unknown import subcommand '\(sub)'")
+    }
+}
+
+private func cmdImportKnown(_ args: [String], store: Store, out: CLIOutput) throws {
+    var filePath: String? = nil
+    var formatArg = "auto"
+    var dryRun = false
+
+    var i = 0
+    while i < args.count {
+        let arg = args[i]
+        switch arg {
+        case "--format":
+            i += 1
+            guard i < args.count else { throw CLIError.usage("--format requires 'auto', 'json', or 'csv'") }
+            formatArg = args[i]
+        case "--dry-run":
+            dryRun = true
+        default:
+            guard filePath == nil, !arg.hasPrefix("--") else {
+                throw CLIError.usage("timetrack import known FILE [--format auto|json|csv] [--dry-run]")
+            }
+            filePath = arg
+        }
+        i += 1
+    }
+
+    guard let path = filePath else {
+        throw CLIError.usage("timetrack import known FILE [--format auto|json|csv] [--dry-run]")
+    }
+
+    // Unlike KnownTasksLoader.ingest(from:) for known_tasks.yaml — where a
+    // missing file is a deliberate silent no-op because the file is an
+    // *optional* startup source — an explicit `import known FILE` names a file
+    // the user asked for by hand; a missing or unreadable one is a mistake to
+    // surface, not swallow.
+    let url = URL(fileURLWithPath: path)
+    guard FileManager.default.fileExists(atPath: url.path) else {
+        throw CLIError.notFound("file '\(path)'")
+    }
+    let text: String
+    do {
+        text = try String(contentsOf: url, encoding: .utf8)
+    } catch {
+        throw CLIError.message("could not read '\(path)' as UTF-8 text: \(error)")
+    }
+
+    // Diagnostics must name the real input file, not a hardcoded
+    // 'known_tasks.yaml' (§4.2) — sourceName threads through to both the codec
+    // warnings below and KnownTasksLoader's ValidationError messages.
+    let sourceName = url.lastPathComponent
+    let format: KnownTaskCodec.Format
+    switch formatArg {
+    case "auto": format = sniffKnownTaskFormat(path: path, text: text)
+    case "json": format = .json
+    case "csv":  format = .csv
+    default: throw CLIError.usage("--format must be 'auto', 'json', or 'csv', got '\(formatArg)'")
+    }
+
+    let decoded: (entries: [KnownTasksLoader.KnownTaskEntry], warnings: [String])
+    do {
+        decoded = try KnownTaskCodec.decode(text: text, format: format)
+    } catch let e as KnownTaskCodec.CodecError {
+        throw CLIError.message("\(sourceName): \(e)")
+    }
+    for warning in decoded.warnings {
+        out.writeError("warning: \(sourceName): \(warning)")
+    }
+
+    let result: KnownTasksLoader.IngestResult
+    do {
+        result = try KnownTasksLoader.ingest(
+            entries: decoded.entries, into: store, sourceName: sourceName, dryRun: dryRun)
+    } catch let e as KnownTasksLoader.ValidationError {
+        // ValidationError already names sourceName in its own message — wrapping
+        // it again would double-prefix the file name.
+        throw CLIError.message("\(e)")
+    }
+
+    printKnownTaskDiff(result, dryRun: dryRun, out: out)
+}
+
+// `auto` (the import default, §6.1): sniff the extension first, then the first
+// non-whitespace byte. A `.csv`/`.json` extension is trusted outright so a
+// user's own naming wins even over odd content; otherwise `{`/`[` means JSON,
+// anything else CSV (a JSON file can start with only those two characters;
+// CSV's first character is unconstrained, so it is the fallback).
+private func sniffKnownTaskFormat(path: String, text: String) -> KnownTaskCodec.Format {
+    let ext = URL(fileURLWithPath: path).pathExtension.lowercased()
+    if ext == "json" { return .json }
+    if ext == "csv" { return .csv }
+    if let firstNonWhitespace = text.first(where: { !$0.isWhitespace }),
+       firstNonWhitespace == "{" || firstNonWhitespace == "[" {
+        return .json
+    }
+    return .csv
+}
+
+// Renders an IngestResult as the four categories docs/interchange-format.md
+// §6.2 names (inserts, promotions, description updates, no-ops), one line per
+// record plus a summary count. Used for both --dry-run (the diff that WOULD be
+// applied) and a real run (the diff that WAS applied) — same rendering, only
+// the verb in the summary line differs, so a user can visually compare a dry
+// run against the real run that follows it.
+//
+// This is entirely diagnostic output, never payload (§6.1: "All diagnostics go
+// to stderr; only payload goes to stdout") — `import known` has no stdout
+// payload of its own, so every line here, including the summary, goes to
+// out.writeError. Written to stderr so it can never be confused with, or
+// contaminate, a machine-readable stream on stdout.
+private func printKnownTaskDiff(_ result: KnownTasksLoader.IngestResult, dryRun: Bool, out: CLIOutput) {
+    var inserts = 0, promotions = 0, updates = 0, noOps = 0
+
+    // KnownTasksLoader.TargetRow makes the pending-vs-real distinction explicit
+    // at the type level (KnownTasksLoader.swift) — under dryRun, a promote/
+    // update/no-op may target a row this same input would insert rather than
+    // one that already exists, and that row has no id a user could look up.
+    //
+    // Deliberately does NOT fall back to entry.jiraKey: on a promote, `entry` is
+    // the KEYED record doing the promoting, so using its key would render
+    // "promote: 'ACME-7' → [ACME-7] …" — naming the key being applied instead of
+    // the row receiving it, and implying that row already has a key when the
+    // whole point is that it does not.
+    func label(_ target: KnownTasksLoader.IngestResult.TargetRow) -> String {
+        switch target {
+        case .existing(let id):
+            return "#\(id)"
+        case .pending:
+            return "(pending)"
+        }
+    }
+
+    for change in result.changes {
+        switch change.outcome {
+        case .insert:
+            inserts += 1
+            let keyDesc = change.entry.jiraKey.map { "[\($0)] " } ?? "(provisional) "
+            out.writeError("  insert:  \(keyDesc)\(change.entry.description)")
+        case .promote(let targetRow):
+            promotions += 1
+            let target = label(targetRow)
+            out.writeError("  promote: \(target) → [\(change.entry.jiraKey ?? "?")] \(change.entry.description)")
+        case .descriptionUpdate(let targetRow, let previous):
+            updates += 1
+            let target = label(targetRow)
+            out.writeError("  update:  \(target): '\(previous)' → '\(change.entry.description)'")
+        case .noOp(let targetRow):
+            noOps += 1
+            let target = label(targetRow)
+            out.writeError("  no-op:   \(target) \(change.entry.description)")
+        }
+    }
+
+    let verb = dryRun ? "would apply" : "applied"
+    out.writeError("\(verb): \(inserts) insert(s), \(promotions) promotion(s), \(updates) description update(s), \(noOps) no-op(s)")
+}
+
+// MARK: - Atomic file writes
+//
+// No precedent for this in the repo before --out FILE (docs/interchange-format
+// §6.1: "the file is written atomically (temp + rename) and never partially
+// written on a gate failure"). Writes to a temp file in the SAME directory as
+// the destination (so the rename is same-filesystem, a requirement for POSIX
+// rename() to be atomic) and renames over the destination with a single
+// rename(2) syscall — not remove-then-move, which would leave a real window
+// where the destination doesn't exist. rename(2) is POSIX and behaves
+// identically on Darwin and Linux, so this needs no platform branch beyond the
+// import at the top of this file.
+private func writeFileAtomically(_ content: String, to url: URL) throws {
+    guard let data = content.data(using: .utf8) else {
+        throw CLIError.message("failed to encode output as UTF-8")
+    }
+    let dir = url.deletingLastPathComponent()
+    let tempURL = dir.appendingPathComponent(".\(url.lastPathComponent).tmp-\(UUID().uuidString)")
+    do {
+        try data.write(to: tempURL, options: .atomic)
+    } catch {
+        throw CLIError.message("failed to write temp file for '\(url.path)': \(error)")
+    }
+    let rc = tempURL.path.withCString { tmpC in
+        url.path.withCString { dstC in
+            rename(tmpC, dstC)
+        }
+    }
+    guard rc == 0 else {
+        let err = errno
+        try? FileManager.default.removeItem(at: tempURL)
+        throw CLIError.message("failed to write '\(url.path)': rename failed (errno \(err))")
+    }
+}
+
 // MARK: - Helpers
 
 // Resolve an existing capture task by numeric id or (case-insensitive) name.
@@ -633,6 +949,19 @@ private func printHelp(_ out: CLIOutput) {
                                              overhead, bind to the overhead
                                              JIRA's known-task id (no special
                                              flag).
+      export known [--format json|csv] [--out FILE] [--include-retired]
+                                             Export the known-tasks registry as
+                                             JSON or CSV (default: stdout, JSON).
+                                             See docs/interchange-format.md.
+      import known FILE [--format auto|json|csv] [--dry-run]
+                                             Import known-task records (JSON or
+                                             CSV) into the registry. --dry-run
+                                             prints the diff without applying it;
+                                             without it, changes are applied.
+
+    Note: human-readable output above (report, status, known list, reconcile,
+    …) is not a contract and may change at any time — only `export`/`import`
+    payloads and CLI exit codes are (docs/interchange-format.md §2).
     """)
 }
 

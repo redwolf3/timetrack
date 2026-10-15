@@ -120,6 +120,26 @@ interpreted as `version: 1` of whichever type the command implies.
 
 RFC 4180. Comma-delimited, `"` quoting, doubled `""` for a literal quote.
 
+**Row terminators.** Writers always emit LF, matching §3's "LF line endings" —
+there is exactly one encoder and it never varies. Readers are more permissive:
+CRLF, LF, or a lone CR are all accepted as a row terminator, since RFC 4180
+itself mandates CRLF and real-world hand-edited or spreadsheet-exported CSV
+routinely arrives that way. A wholly blank line (no delimiters, decoding to a
+single empty field) is skipped rather than treated as a malformed one-column
+row — hand-edited files commonly have a trailing or stray blank line, and it
+carries no data to reject.
+
+**Quoting.** A `"` opens a quoted field only at the *start* of a field.
+Encountered mid-field it is a literal character, so a hand-written
+`Fix "quoted" bug` survives verbatim rather than having its quotes silently
+stripped — Python's `csv` reader, the reference implementation for the §8
+example scripts, preserves it identically in both default and strict modes.
+Inside a quoted field, `""` is a literal quote; after the closing quote only a
+comma, a row terminator, or end-of-file may follow. Anything else
+(`"quoted"junk`) is rejected as malformed: there is no way to tell whether the
+author meant the quotes literally or mis-escaped the field, and guessing would
+corrupt a `description`, which is the identity key for provisional rows (§4.2).
+
 **The header row is the version identifier.** There is no `format_version`
 column repeated on every row — that would make the file awkward in awk, pandas,
 and Excel, which is the whole reason CSV is offered. The exact header strings
@@ -418,8 +438,9 @@ timetrack import worklog FILE [--format auto|json|csv] [--dry-run]
 
 ### 6.1 Conventions
 
-- `--format` defaults to `json`. `auto` on import sniffs by extension, then by
-  first non-whitespace byte (`{` or `[` → JSON, else CSV).
+- `--format` defaults differ by direction: **export** defaults to `json`;
+  **import** defaults to `auto`, which sniffs by extension, then by first
+  non-whitespace byte (`{` or `[` → JSON, else CSV).
 - `--out` defaults to stdout, so everything pipes. When `--out` is given, the
   file is written atomically (temp + rename) and **never** partially written on
   a gate failure.
