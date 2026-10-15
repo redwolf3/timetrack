@@ -94,11 +94,25 @@ struct StatusHeaderView: View {
                 .font(.headline)
                 .foregroundStyle(.secondary)
         } else {
-            Text(appState.activeTaskName)
-                .font(.headline)
-                .foregroundStyle(appState.iconColor)
-                .lineLimit(1)
-                .truncationMode(.tail)
+            // Key on its own mono line, then the description wrapping to at most
+            // two lines (#71). The split is published by AppState from the kit's
+            // TaskTitle; a keyless task (e.g. Break) simply has no key line.
+            VStack(alignment: .leading, spacing: 1) {
+                if let key = appState.activeTaskKey {
+                    Text(key)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Text(appState.activeTaskDescription)
+                    .font(.headline)
+                    .foregroundStyle(appState.iconColor)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+                    // The MenuBarExtra window sizes from ideal height; let the
+                    // wrapped second line claim its vertical space.
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 }

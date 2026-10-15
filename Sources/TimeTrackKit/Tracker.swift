@@ -644,6 +644,48 @@ public final class Tracker {
         return inserted
     }
 
+    // Entry point for free-text task capture (issue #71). Splits a leading
+    // JIRA-style key into `code` so dedup-by-code can see it.
+    //
+    // Dedup ("JIRA key wins", DESIGN.md "Task sources"): if a user task with the
+    // same code already exists — from tasks.yaml or an earlier ad-hoc add — it is
+    // returned instead of inserting a second row. Two rows sharing a code would
+    // split one ticket's time across rows, show twice in the picker, and make
+    // TasksLoader.ingest throw .ambiguousCode on the next yaml load. The existing
+    // row's name/category are kept: the first source to claim the key owns its
+    // title (tasks.yaml re-ingest can still rename it).
+    //
+    // An archived match is reactivated rather than duplicated, mirroring the CLI's
+    // start-by-name rule. This mutates the `tasks` registry row, never `events`,
+    // so the append-only log invariant is untouched.
+    //
+    // A key here is NOT a reconcile binding (CLAUDE.md invariant 4): the task is
+    // still unbound until an explicit reconcile_bind.
+    @discardableResult
+    public func addTask(typedName: String, category: String = "project") throws -> Task {
+        let title = TaskTitle.parse(typedName)
+        guard let key = title.key else {
+            return try addTask(name: title.description, code: nil, category: category)
+        }
+
+        // Case-insensitive so a hand-typed lower-case yaml code still matches
+        // the uppercased parsed key. The break task is never a candidate.
+        let matches = try store.userTasks(includeArchived: true)
+            .filter { $0.code?.uppercased() == key }
+            .sorted { ($0.id ?? Int64.max) < ($1.id ?? Int64.max) }
+        if let live = matches.first(where: { !$0.archived }) {
+            return live
+        }
+        if let archived = matches.first {
+            var reactivated = archived
+            reactivated.archived = false
+            let saved = try store.upsertTask(reactivated)
+            self.tasks = try store.tasks()
+            return saved
+        }
+        return try addTask(name: title.description, code: key, category: category)
+    }
+
     // MARK: - Helpers
 
     private func currentTaskId() -> Int64? {

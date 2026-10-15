@@ -54,13 +54,19 @@ private struct IdleSegmentRowView: View {
             }
 
             HStack(spacing: 6) {
-                Button("Keep on \(item.originalTaskName)") {
+                // Key-first label (#71), one line, tail-truncated so it shrinks
+                // to share the row with Break at the fixed popover width. The
+                // key always survives; the tooltip carries the full title.
+                Button {
                     appState.resolveIdleSegment(item.id, as: .keepOnOriginal)
+                } label: {
+                    Text(item.keepLabel)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
-                .lineLimit(1)
-                .truncationMode(.tail)
+                .help(item.keepLabel)
 
                 // Omitted when the choice is unhonourable (no break row in the
                 // registry) or redundant (the segment already accrued to break,
