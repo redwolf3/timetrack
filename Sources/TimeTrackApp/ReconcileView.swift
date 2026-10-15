@@ -92,6 +92,34 @@ struct ReconcileView: View {
     }
 }
 
+// MARK: - TitleLabel
+
+// Key (mono, secondary) over a description of up to two lines — the #71 title
+// treatment, matching the popover's task rows. Pure rendering: callers pass
+// an already-split key/description (Task.title from the kit, or a KnownTask's
+// own fields); nothing is parsed here.
+private struct TitleLabel: View {
+    let key: String?
+    let description: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            if let key {
+                Text(key)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Text(description)
+                .font(.caption)
+                .foregroundStyle(.primary)
+                .lineLimit(2)
+                .truncationMode(.tail)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
 // MARK: - UnboundRowView
 
 // One row per ad-hoc capture task that has time but no Known Task binding.
@@ -106,12 +134,8 @@ private struct UnboundRowView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Text(item.task.name)
-                    .font(.caption)
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+            HStack(alignment: .firstTextBaseline) {
+                TitleLabel(key: item.task.title.key, description: item.task.title.description)
                 Spacer()
                 Text(appState.formatDuration(item.totalSeconds))
                     .font(.caption)
@@ -167,23 +191,24 @@ private struct ProvisionalRowView: View {
     @State private var draftKey: String = ""
 
     var body: some View {
-        HStack(spacing: 6) {
-            Text(kt.description)
-                .font(.caption)
-                .foregroundStyle(.primary)
-                .lineLimit(1)
-                .truncationMode(.tail)
-            Spacer()
-            TextField("JIRA key…", text: $draftKey)
-                .font(.caption)
-                .frame(width: 80)
-                .onSubmit { promote() }
-            Button("Set", action: promote)
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                // AppState also guards against empty/whitespace, but disable for UX
-                // so the button is visually inert when the field is blank.
-                .disabled(draftKey.trimmingCharacters(in: .whitespaces).isEmpty)
+        // Description gets the full row width (up to two lines) with the key
+        // field below it (#71): sharing one line with the 80pt field left the
+        // description ~20 chars. Provisional ⇒ no jiraKey, so no key line.
+        VStack(alignment: .leading, spacing: 2) {
+            TitleLabel(key: kt.jiraKey, description: kt.description)
+            HStack(spacing: 6) {
+                Spacer()
+                TextField("JIRA key…", text: $draftKey)
+                    .font(.caption)
+                    .frame(width: 80)
+                    .onSubmit { promote() }
+                Button("Set", action: promote)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    // AppState also guards against empty/whitespace, but disable for UX
+                    // so the button is visually inert when the field is blank.
+                    .disabled(draftKey.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 3)

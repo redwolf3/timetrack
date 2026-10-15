@@ -16,7 +16,8 @@ private struct TaskRowHeightPreferenceKey: PreferenceKey {
     }
 }
 
-// Root popover content. ~280pt wide, up to ~400pt tall.
+// Root popover content. Fixed 360pt wide (see popoverWidth); height follows
+// the content.
 // Delegates all state reads to @EnvironmentObject AppState — no logic here.
 struct MenuBarPopoverView: View {
     @EnvironmentObject var appState: AppState
@@ -42,7 +43,18 @@ struct MenuBarPopoverView: View {
     // TaskRowHeightPreferenceKey reports the real measured row height (a
     // fixed guess would drift from TaskRowView's actual size under Dynamic
     // Type or padding/font changes — see the "Task list" comment in body).
-    private static let taskRowHeightFallback: CGFloat = 32
+    // ~59pt is a two-line-description TaskRowView (#71): mono key line plus
+    // two reserved body lines plus padding.
+    private static let taskRowHeightFallback: CGFloat = 59
+
+    // The task list shows at most this many rows, then scrolls (#71). A row
+    // count rather than a point cap, so the list never shows a clipped partial
+    // row and the cap stays meaningful if the row height changes.
+    private static let maxVisibleTaskRows = 6
+
+    // Fixed popover width (#71). 360pt gives the two-line task description
+    // ~310pt per line, enough for typical 45–75 char JIRA titles in full.
+    private static let popoverWidth: CGFloat = 360
 
     // Real measured TaskRowView height, filled in once the first row lays
     // out. nil only until then.
@@ -89,9 +101,12 @@ struct MenuBarPopoverView: View {
             // bounds that ideal size from above — it doesn't give the ScrollView
             // a concrete number to report, so it collapsed to ~0pt regardless of
             // how many tasks were loaded. Computing an exact height from the row
-            // count (capped at the same 260pt) gives it a real number to report,
-            // so the window sizes to fit the rows and scrolls past the cap. With
-            // that explicit height in place, LazyVStack now has a bounded region
+            // count (capped at maxVisibleTaskRows rows) gives it a real number to
+            // report, so the window sizes to fit the rows and scrolls past the
+            // cap. This multiplication is only valid because every TaskRowView
+            // has the same height (two-line description with reserved space and
+            // an always-present key line — see TaskRowView).
+            // With that explicit height in place, LazyVStack has a bounded region
             // to lay out within, so it's safe again (and avoids building every
             // off-screen row up front for longer task lists). The per-row height
             // is measured from the first laid-out row rather than hard-coded, so
@@ -114,10 +129,10 @@ struct MenuBarPopoverView: View {
             .onPreferenceChange(TaskRowHeightPreferenceKey.self) { height in
                 if height > 0 { measuredTaskRowHeight = height }
             }
-            .frame(height: min(
-                CGFloat(appState.tasks.count) * (measuredTaskRowHeight ?? Self.taskRowHeightFallback),
-                260
-            ))
+            .frame(height:
+                CGFloat(min(appState.tasks.count, Self.maxVisibleTaskRows))
+                    * (measuredTaskRowHeight ?? Self.taskRowHeightFallback)
+            )
 
             Divider()
 
@@ -159,7 +174,7 @@ struct MenuBarPopoverView: View {
             Divider()
             quitRestartRow
         }
-        .frame(width: 280)
+        .frame(width: Self.popoverWidth)
         .background(.regularMaterial)
         .onAppear {
             // Refresh from live SMAppService status each time the popover
@@ -498,7 +513,7 @@ struct MenuBarPopoverView: View {
             }
         }
         .padding(24)
-        .frame(minWidth: 280)
+        .frame(minWidth: Self.popoverWidth)
         // Auto-focus the minutes field so the user can type immediately.
         .onAppear { extendFocused = true }
     }

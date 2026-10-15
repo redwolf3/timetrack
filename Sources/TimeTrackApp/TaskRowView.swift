@@ -6,6 +6,16 @@ import TimeTrackKit
 // Tap calls select(taskId:), which delegates to tracker.switchTo() so the
 // phase cycle is preserved on task switches (DESIGN.md: TRACKING → switch →
 // TRACKING(task', same phase)).
+//
+// Two lines (#71): the JIRA key in a mono caption with today's time on the
+// right, then the description wrapping to at most two lines. The key/description
+// split comes from the kit (task.title) — this view never parses names.
+//
+// INVARIANT: every row has the same height, whatever its content. The popover
+// sizes the task list as (row count × height of the first measured row), so a
+// row that came out shorter or taller would break that arithmetic. Hence the
+// description always reserves two lines, and a keyless row still draws a
+// (blank) key line.
 struct TaskRowView: View {
     let task: TimeTrackKit.Task
     @EnvironmentObject var appState: AppState
@@ -16,6 +26,8 @@ struct TaskRowView: View {
         guard let id = task.id else { return false }
         return appState.activeTaskId == id
     }
+
+    private var title: TaskTitle { task.title }
 
     // Format today's seconds for this task as a compact annotation.
     // Sub-minute time (1–59 s) is shown as "<1m" so the user knows time accrued
@@ -35,31 +47,43 @@ struct TaskRowView: View {
         }
     }
 
+    // What VoiceOver reads: "KDAL-1234, Paginate accounts API…, 25m". The blank
+    // placeholder key line and the decorative indicator are left out.
+    private var accessibilityText: String {
+        [title.key, title.description, todayAnnotation]
+            .compactMap { $0 }
+            .filter { !$0.isEmpty }
+            .joined(separator: ", ")
+    }
+
     var body: some View {
         Button {
             guard let id = task.id else { return }
             appState.select(taskId: id)
         } label: {
-            HStack {
+            // firstTextBaseline: the indicator sits on the key line, and SF
+            // Symbol images carry a text baseline, so the dot lines up with it.
+            HStack(alignment: .firstTextBaseline) {
                 // Play/active indicator: the active row shows a filled dot so the
                 // user always knows which task is running; inactive rows reveal a
                 // play triangle on hover to signal "tap to switch here".
-                // Fixed-width frame keeps the task name aligned across all rows.
+                // Fixed-width frame keeps the text column aligned across all rows.
                 startIndicator
                     .frame(width: 16, alignment: .center)
 
-                Text(task.name)
-                    .font(isActive ? .body.bold() : .body)
-                    .foregroundStyle(isActive ? Color.accentColor : Color.primary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+                VStack(alignment: .leading, spacing: 2) {
+                    keyLine
 
-                Spacer()
-
-                if let annotation = todayAnnotation {
-                    Text(annotation)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Text(title.description)
+                        .font(isActive ? .body.bold() : .body)
+                        .foregroundStyle(isActive ? Color.accentColor : Color.primary)
+                        // reservesSpace: a one-line description still occupies
+                        // two lines, keeping every row the same height (see the
+                        // invariant at the top of this file).
+                        .lineLimit(2, reservesSpace: true)
+                        .truncationMode(.tail)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
             .contentShape(Rectangle())
@@ -75,10 +99,32 @@ struct TaskRowView: View {
         .onChange(of: isActive) { _, active in
             if active { isHovered = false }
         }
-        // The icons are decorative; VoiceOver should read the task name (and
-        // today's time annotation) only. The active/tracked state is conveyed
-        // via accessibilityValue so it remains perceivable without the icon.
+        // The icons and the blank key placeholder are decorative; VoiceOver
+        // reads key, description and today's time only. The active/tracked state
+        // is conveyed via accessibilityValue so it remains perceivable without
+        // the icon.
+        .accessibilityLabel(Text(accessibilityText))
         .accessibilityValue(isActive ? "Tracking" : "")
+    }
+
+    // Line 1: key (mono caption) on the left, today's time on the right.
+    // A keyless task (an ad-hoc name with no JIRA key) renders a single space
+    // in the same font, so the line keeps its height — see the file invariant.
+    private var keyLine: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(title.key ?? " ")
+                .font(.caption.monospaced())
+                .foregroundStyle(isActive ? Color.accentColor : Color.secondary)
+                .lineLimit(1)
+
+            Spacer()
+
+            if let annotation = todayAnnotation {
+                Text(annotation)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 
     // The leading indicator column.
