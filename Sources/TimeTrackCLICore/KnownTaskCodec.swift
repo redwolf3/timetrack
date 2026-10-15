@@ -346,8 +346,8 @@ public enum KnownTaskCodec {
     }
 
     private static func csvQuoteIfNeeded(_ field: String) -> String {
-        if field.contains(",") || field.contains("\"") || field.contains("\n") || field.contains("\r") {
-            return "\"" + field.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+        if field.unicodeScalars.contains(where: { $0 == "," || $0 == "\"" || $0 == "\n" || $0 == "\r" }) {
+            return "\"" + field.unicodeScalars.map { $0 == "\"" ? "\"\"" : String($0) }.joined() + "\""
         }
         return field
     }
