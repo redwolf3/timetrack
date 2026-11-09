@@ -711,7 +711,16 @@ public final class Store {
     public func knownTasks(activeOnly: Bool = true) throws -> [KnownTask] {
         try dbQueue.read { db in
             // Fetch all base rows; history events will overlay them below.
-            var rows = try KnownTask.order(Column("createdTs").desc).fetchAll(db)
+            // Secondary sort by id (desc): createdTs is millisecond-resolution,
+            // so two rows inserted in the same millisecond otherwise have
+            // unspecified relative order — nondeterminism that is invisible in
+            // the CLI's human-readable `known list` but breaks the byte-
+            // identical export round-trip required by
+            // docs/interchange-format.md §4.2 (two `export known` runs over the
+            // same registry state must agree on row order). id is monotonic
+            // (SQLite rowid), so this is a free, stable tiebreaker; the primary
+            // ordering is unchanged, so existing displayed output is unaffected.
+            var rows = try KnownTask.order(Column("createdTs").desc, Column("id").desc).fetchAll(db)
 
             // Collect the most-recent promote/retire event per known_tasks id.
             // Last-write-wins: events are ordered ascending by ts/id so later
@@ -761,7 +770,13 @@ public final class Store {
 
     @discardableResult
     public func addKnownTask(jiraKey: String?, description: String) throws -> KnownTask {
-        try dbQueue.write { db in
+        // Normalise on write, matching KnownTaskEntry.init: the interchange
+        // import trims, so a padded registry label would never round-trip as a
+        // no-op (import would miss the provisional row and insert a duplicate).
+        let description = description.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedKey = jiraKey?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let jiraKey = (trimmedKey?.isEmpty ?? true) ? nil : trimmedKey
+        return try dbQueue.write { db in
             var k = KnownTask(
                 id: nil, jiraKey: jiraKey, description: description,
                 provisional: (jiraKey == nil),
@@ -784,6 +799,7 @@ public final class Store {
             try KnownTask.fetchOne(db, key: id) != nil
         }
         guard exists else { return false }
+        let jiraKey = jiraKey.trimmingCharacters(in: .whitespacesAndNewlines)
         try append(Event(
             id: nil, ts: 0, type: EventType.knownTaskPromote.rawValue,
             taskId: nil, prevTaskId: nil,

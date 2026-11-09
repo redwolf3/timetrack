@@ -63,6 +63,40 @@ known_tasks:
 
 `events.db` is the source of truth. YAML files are convenience for editing.
 
+## Import / export
+
+```
+timetrack export known [--format json|csv] [--out FILE] [--include-retired]
+timetrack import known FILE [--format auto|json|csv] [--dry-run]
+```
+
+The stable, versioned, scriptable surface for getting the Known Tasks registry
+into and out of TimeTrack — JIRA worklog uploaders, spreadsheet pipelines, bulk
+registry setup from a JIRA search, without reading `events.db` directly.
+
+- `export known` writes the active (non-retired) registry as JSON (default) or
+  CSV to stdout, or atomically to `--out FILE`; `--include-retired` adds
+  retired entries. Diagnostics, if any, go to stderr — stdout is payload only.
+- `import known FILE` reads JSON or CSV (`--format auto`, the default, sniffs
+  the extension then the first non-whitespace byte) and upserts it into the
+  registry through the same rules `known_tasks.yaml` uses: match-by-key,
+  promote a matching provisional entry, or insert; entries missing from the
+  file are left untouched (import never retires). `--dry-run` prints the diff
+  — inserts, promotions, description updates, no-ops — without applying it;
+  omitting the flag applies the changes.
+- Exit codes: 0 success, 1 usage error / unreadable or missing file / malformed
+  input / unknown format or version.
+
+Full field-level contract, CSV quoting rules, and the round-trip guarantee:
+**`docs/interchange-format.md`**. `export worklog`, `export events`, and
+`import worklog` are specified there but not yet implemented.
+
+**Human-readable CLI output is not a contract.** `report`, `status`,
+`known list`, `reconcile`, and every command run without `--format` are
+column-padded prose for eyes only and may change at any time. Only
+`export`/`import` payloads and CLI exit codes are the stable surface
+(`docs/interchange-format.md` §2).
+
 ## Architecture
 
 Five files, ~500 lines:
