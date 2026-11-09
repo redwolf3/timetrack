@@ -238,6 +238,63 @@ final class TaskTitleTests: XCTestCase {
             XCTAssertEqual(t.name, "Accounts API pagination")
             XCTAssertEqual(try store.userTasks(includeArchived: true)
                 .filter { $0.code == "KDAL-1234" }.count, 1)
+
+            // The yaml row was ingested after the Tracker loaded its cache;
+            // switching to it must still resolve activeTask.
+            let id = try XCTUnwrap(t.id)
+            tracker.switchTo(taskId: id)
+            XCTAssertEqual(tracker.activeTask?.id, id)
+        }
+    }
+
+    // Mixed case, ad-hoc first: a lower-case yaml code matches the uppercased
+    // typed key instead of inserting a second row.
+    func testAdHocThenLowerCaseYamlCodeMergesIntoOneRow() throws {
+        let dir = try makeTmpDir()
+        try MainActor.assumeIsolated {
+            let (tracker, store, _) = try makeTrackerContext(in: dir)
+
+            let adHoc = try tracker.addTask(typedName: "kdal-1234 - Paginate accounts API")
+            XCTAssertEqual(adHoc.code, "KDAL-1234")
+
+            let yaml = """
+            tasks:
+              - name: Accounts API pagination
+                code: kdal-1234
+                category: project
+            """
+            let url = dir.appendingPathComponent("tasks.yaml")
+            try yaml.write(to: url, atomically: true, encoding: .utf8)
+            XCTAssertEqual(try TasksLoader.ingest(from: url, into: store), 1)
+
+            let rows = try store.userTasks(includeArchived: true)
+                .filter { $0.code?.uppercased() == "KDAL-1234" }
+            XCTAssertEqual(rows.count, 1)
+            XCTAssertEqual(rows.first?.id, adHoc.id)
+        }
+    }
+
+    // Mixed case, yaml first: the typed key reuses the lower-case yaml row.
+    func testLowerCaseYamlCodeThenAdHocReusesYamlRow() throws {
+        let dir = try makeTmpDir()
+        try MainActor.assumeIsolated {
+            let (tracker, store, _) = try makeTrackerContext(in: dir)
+
+            let yaml = """
+            tasks:
+              - name: Accounts API pagination
+                code: kdal-1234
+                category: project
+            """
+            let url = dir.appendingPathComponent("tasks.yaml")
+            try yaml.write(to: url, atomically: true, encoding: .utf8)
+            XCTAssertEqual(try TasksLoader.ingest(from: url, into: store), 1)
+            let yamlRow = try XCTUnwrap(store.userTasks().first { $0.code == "kdal-1234" })
+
+            let t = try tracker.addTask(typedName: "KDAL-1234 - Paginate accounts API")
+            XCTAssertEqual(t.id, yamlRow.id)
+            XCTAssertEqual(try store.userTasks(includeArchived: true)
+                .filter { $0.code?.uppercased() == "KDAL-1234" }.count, 1)
         }
     }
 

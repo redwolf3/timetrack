@@ -95,7 +95,12 @@ public enum TasksLoader {
                 // UNIQUE constraint on code, so pre-existing duplicates would make
                 // "which row do I update" arbitrary — fail loudly instead of
                 // silently picking one (no heuristic ever decides; see CLAUDE.md).
-                let matches = existing.filter { $0.code == code && $0.category != "break" }
+                // Case-insensitive, matching Tracker.addTask(typedName:), so a
+                // lower-case yaml code and an uppercased typed key are one task
+                // whichever source arrives first. The stored code is kept as typed.
+                let matches = existing.filter {
+                    $0.code?.uppercased() == code.uppercased() && $0.category != "break"
+                }
                 guard matches.count <= 1 else {
                     throw ValidationError.ambiguousCode(code, ids: matches.compactMap(\.id))
                 }
@@ -199,8 +204,9 @@ public enum TasksLoader {
 
             // Duplicate detection (within the file).
             if let c = code {
-                if seenCodes.contains(c) { throw ValidationError.duplicateCode(c) }
-                seenCodes.insert(c)
+                // Same case-insensitive identity as ingest matching.
+                if seenCodes.contains(c.uppercased()) { throw ValidationError.duplicateCode(c) }
+                seenCodes.insert(c.uppercased())
             } else {
                 if seenCodelessNames.contains(name) { throw ValidationError.duplicateCodelessName(name) }
                 seenCodelessNames.insert(name)

@@ -674,6 +674,9 @@ public final class Tracker {
             .filter { $0.code?.uppercased() == key }
             .sorted { ($0.id ?? Int64.max) < ($1.id ?? Int64.max) }
         if let live = matches.first(where: { !$0.archived }) {
+            // The match may have been ingested (tasks.yaml) after this Tracker
+            // loaded its cache; refresh so switchTo resolves activeTask.
+            self.tasks = try store.tasks()
             return live
         }
         if let archived = matches.first {
