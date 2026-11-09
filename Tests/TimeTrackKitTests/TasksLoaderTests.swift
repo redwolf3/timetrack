@@ -263,6 +263,26 @@ final class TasksLoaderTests: XCTestCase {
         XCTAssertEqual(row.category, "project")
     }
 
+    // Code identity is case-insensitive (matches Tracker.addTask(typedName:)),
+    // so two yaml entries differing only in case are duplicates.
+    func testCodesDifferingOnlyInCaseThrowDuplicateCode() throws {
+        let dir = try makeTmpDir()
+        let store = try makeStore(in: dir)
+        let url = try writeYAML("""
+        tasks:
+          - name: One
+            code: PROJ-1
+          - name: Two
+            code: proj-1
+        """, to: dir)
+
+        XCTAssertThrowsError(try TasksLoader.ingest(from: url, into: store)) { error in
+            guard case TasksLoader.ValidationError.duplicateCode = error else {
+                return XCTFail("expected .duplicateCode, got \(error)")
+            }
+        }
+    }
+
     func testNewlineOnlyNameThrowsEmptyName() throws {
         let dir = try makeTmpDir()
         let store = try makeStore(in: dir)

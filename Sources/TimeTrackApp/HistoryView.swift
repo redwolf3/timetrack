@@ -52,18 +52,25 @@ struct HistoryView: View {
 
     @ViewBuilder
     private func taskRow(_ row: Store.DayRow) -> some View {
-        HStack {
+        // task.title (#71) splits the key off for display, so a legacy row whose
+        // name embeds "KEY - description" shows split like a coded one. Display
+        // only — stored names/codes are untouched. Key above description, same
+        // order as the popover's task rows.
+        let title = row.task.title
+        HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 1) {
-                Text(row.task.name)
+                if let key = title.key {
+                    Text(key)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Text(title.description)
                     .font(.caption)
                     .foregroundStyle(.primary)
-                    .lineLimit(1)
+                    .lineLimit(2)
                     .truncationMode(.tail)
-                if let code = row.task.code {
-                    Text(code)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
             Text(appState.formatDuration(row.totalSeconds))

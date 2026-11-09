@@ -30,7 +30,10 @@ struct IdleSegmentItem: Identifiable, Equatable {
     let timeRangeLabel: String   // "14:05 – 14:32"
     let durationLabel: String    // "27m"
     let kindLabel: String        // "In phase" / "Overrun"
-    let originalTaskName: String // for the "Keep on …" label
+    // "Keep on KDAL-1234 · Paginate accounts…" — built from the original task's
+    // kit-split TaskTitle (#71). The view tail-truncates it to one line and
+    // shows it in full as the button's tooltip.
+    let keepLabel: String
     let offersBreak: Bool        // false when the registry has no break task
     let moveTargets: [IdleMoveTarget]
 }
@@ -50,7 +53,13 @@ final class AppState: ObservableObject {
     @Published var iconColor: Color = .secondary
 
     // Status bar (top of popover)
+    // activeTaskName stays the canonical "is anything active" signal (empty ⇔
+    // idle) that other views gate on. The key/description pair below is the
+    // display split of the same task (#71), derived by the kit's TaskTitle —
+    // views never parse names themselves.
     @Published var activeTaskName: String = ""
+    @Published var activeTaskKey: String? = nil
+    @Published var activeTaskDescription: String = ""
     @Published var phaseLabel: String = ""
     @Published var elapsedSeconds: Int = 0
     @Published var trackerState: TrackerState = .idle
@@ -308,6 +317,17 @@ final class AppState: ObservableObject {
         }
     }
 
+    // Mirror the active task's key/description split (#71) for the header.
+    // Called from updatePublished alongside every non-idle activeTaskName
+    // assignment so the three properties never disagree. A missing activeTask
+    // (shouldn't happen while tracking) degrades to an empty description, the
+    // same as activeTaskName's "" fallback.
+    private func publishActiveTaskTitle() {
+        let title = tracker.activeTask?.title
+        activeTaskKey = title?.key
+        activeTaskDescription = title?.description ?? ""
+    }
+
     // MARK: - updatePublished — SINGLE chokepoint for TrackerState
 
     // This is the ONLY place in the entire app that pattern-matches TrackerState.
@@ -327,6 +347,8 @@ final class AppState: ObservableObject {
             iconSymbol = "timer"
             iconColor = .secondary
             activeTaskName = ""
+            activeTaskKey = nil
+            activeTaskDescription = ""
             phaseLabel = ""
             elapsedSeconds = 0
             activeTaskId = nil
@@ -339,6 +361,7 @@ final class AppState: ObservableObject {
             activeTaskId = taskId
             currentPhaseId = phase.id
             activeTaskName = tracker.activeTask?.name ?? ""
+            publishActiveTaskTitle()
             phaseLabel = phase.id.replacingOccurrences(of: "_", with: " ").capitalized
             armedActions = []
 
@@ -367,6 +390,7 @@ final class AppState: ObservableObject {
             activeTaskId = taskId
             currentPhaseId = phase.id
             activeTaskName = tracker.activeTask?.name ?? ""
+            publishActiveTaskTitle()
             phaseLabel = phase.id.replacingOccurrences(of: "_", with: " ").capitalized + " (armed)"
             armedActions = phase.onArm.actions
 
@@ -491,7 +515,9 @@ final class AppState: ObservableObject {
         // addTask returns the inserted Task with its id populated via didInsert.
         // Using the returned id avoids a name-search that would find the WRONG row
         // if two unarchived tasks share the same name (no UNIQUE constraint on name).
-        let inserted = try tracker.addTask(name: name, code: nil)
+        // typedName: the kit splits a typed "KDAL-1234 - description" into
+        // code + name (#71). Parsing is a kit rule, never done here.
+        let inserted = try tracker.addTask(typedName: name)
         guard let id = inserted.id else {
             throw AppStateError.taskNotFoundAfterInsert(name: name)
         }
@@ -571,21 +597,21 @@ final class AppState: ObservableObject {
         let items: [IdleSegmentItem] = tracker.pendingIdleSegments.map { seg in
             // tracker.tasks (not the published `tasks`) — the original task may be
             // the break task, which the published list filters out.
-            let name = tracker.tasks.first(where: { $0.id == seg.originalTaskId })?.name
-                ?? "Unknown task"
+            let title = tracker.tasks.first(where: { $0.id == seg.originalTaskId })?.title
+                ?? TaskTitle.parse("Unknown task")
             let range = "\(Self.idleTimeFormatter.string(from: seg.start))"
                 + " – \(Self.idleTimeFormatter.string(from: seg.end))"
             // "Move to" means move somewhere ELSE; keeping it on the original is
             // the separate Keep choice.
             let targets = selectable
                 .filter { $0.id != seg.originalTaskId }
-                .compactMap { t in t.id.map { IdleMoveTarget(id: $0, name: t.name) } }
+                .compactMap { t in t.id.map { IdleMoveTarget(id: $0, name: Self.titleLabel(for: t.title)) } }
             return IdleSegmentItem(
                 id: seg.id,
                 timeRangeLabel: range,
                 durationLabel: formatDuration(Int(seg.end.timeIntervalSince(seg.start))),
                 kindLabel: Self.kindLabel(for: seg.kind),
-                originalTaskName: name,
+                keepLabel: Self.keepLabel(for: title),
                 // Break is offered only for segments that did NOT originate in a
                 // break phase. During a break phase the accruing task already IS
                 // the synthetic break task, so buildSegments sets originalTaskId
@@ -601,6 +627,23 @@ final class AppState: ObservableObject {
                 moveTargets: targets)
         }
         if items != pendingIdleSegments { pendingIdleSegments = items }
+    }
+
+    // "Keep on KEY · description" when the task has a key, else "Keep on
+    // description". One line, key first: the view tail-truncates it, so the
+    // key (the part that identifies the task) is the part that always survives.
+    private static func keepLabel(for title: TaskTitle) -> String {
+        "Keep on \(titleLabel(for: title))"
+    }
+
+    // One-line "KEY · description" for menus and buttons, where a two-line
+    // layout isn't available. Key first so it survives tail truncation and
+    // tasks with similar descriptions stay distinguishable.
+    private static func titleLabel(for title: TaskTitle) -> String {
+        if let key = title.key {
+            return "\(key) · \(title.description)"
+        }
+        return title.description
     }
 
     // Exhaustive switch (no default) so a new IdleSegment.Kind is a compile error
