@@ -183,7 +183,17 @@ public enum KnownTasksLoader {
         // Effective registry (overlay applied), including retired, so matching
         // sees current jiraKey/provisional state and never re-inserts a promoted
         // or retired entry.
-        let initialExisting = try store.knownTasks(activeOnly: false)
+        // Rows written before Store.addKnownTask normalised on write may carry
+        // padded text; compare them normalised (ids untouched) so an unedited
+        // export still imports as all no-ops rather than duplicating/updating.
+        let initialExisting = try store.knownTasks(activeOnly: false).map { row -> KnownTask in
+            var r = row
+            r.description = row.description.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let key = row.jiraKey {
+                r.jiraKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            return r
+        }
 
         // Both ambiguity errors (rule 7) are properties of PRE-EXISTING registry
         // duplicates (known_tasks has no UNIQUE constraint on jiraKey, so these

@@ -770,7 +770,13 @@ public final class Store {
 
     @discardableResult
     public func addKnownTask(jiraKey: String?, description: String) throws -> KnownTask {
-        try dbQueue.write { db in
+        // Normalise on write, matching KnownTaskEntry.init: the interchange
+        // import trims, so a padded registry label would never round-trip as a
+        // no-op (import would miss the provisional row and insert a duplicate).
+        let description = description.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedKey = jiraKey?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let jiraKey = (trimmedKey?.isEmpty ?? true) ? nil : trimmedKey
+        return try dbQueue.write { db in
             var k = KnownTask(
                 id: nil, jiraKey: jiraKey, description: description,
                 provisional: (jiraKey == nil),
@@ -793,6 +799,7 @@ public final class Store {
             try KnownTask.fetchOne(db, key: id) != nil
         }
         guard exists else { return false }
+        let jiraKey = jiraKey.trimmingCharacters(in: .whitespacesAndNewlines)
         try append(Event(
             id: nil, ts: 0, type: EventType.knownTaskPromote.rawValue,
             taskId: nil, prevTaskId: nil,

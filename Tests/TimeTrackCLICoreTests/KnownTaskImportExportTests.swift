@@ -712,4 +712,20 @@ final class KnownTaskSpecCoverageTests: XCTestCase {
         XCTAssertTrue(afterCSV.contains { $0.description == "From txt as CSV" && $0.jiraKey == "PROJ-8" },
                       "a .txt file not starting with '{' or '[' must sniff as CSV")
     }
+
+    // Copilot "previously missed" finding on 072de41: padded labels written by
+    // `known add` must round-trip as zero-change (no duplicate / update).
+    func testPaddedKnownAddRoundTripsAsNoOps() throws {
+        let dir = try makeTempDir()
+        try runCLI(["known", "add", "--provisional", "  Draft  "], dataDir: dir)
+        try runCLI(["known", "add", "  PROJ-1  ", "  Keyed  "], dataDir: dir)
+        let exported = try runCLI(["export", "known", "--format", "json"], dataDir: dir)
+        let file = dir.appendingPathComponent("roundtrip.json")
+        try exported.text.write(to: file, atomically: true, encoding: .utf8)
+        try runCLI(["import", "known", file.path], dataDir: dir)
+        let tasks = try openStore(dir).knownTasks(activeOnly: false)
+        XCTAssertEqual(tasks.count, 2)
+        XCTAssertTrue(tasks.contains { $0.provisional && $0.description == "Draft" })
+        XCTAssertTrue(tasks.contains { $0.jiraKey == "PROJ-1" && $0.description == "Keyed" })
+    }
 }
